@@ -294,14 +294,14 @@ metadata:
 
 test_plan:
   current_focus:
-    - "User Authentication System"
-    - "Video Upload and Management"
-    - "Video Streaming"
-    - "Content Categorization and Search"
-    - "Authentication UI"
     - "Video Player Interface"
-  stuck_tasks: []
-  test_all: true
+    - "Video Upload Interface"
+    - "Video Grid and Search"
+  stuck_tasks:
+    - "Video Player Interface"
+    - "Video Upload Interface"
+    - "Video Grid and Search"
+  test_all: false
   test_priority: "high_first"
 
 agent_communication:
