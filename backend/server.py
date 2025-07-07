@@ -40,7 +40,7 @@ uploads_dir.mkdir(exist_ok=True)
 app = FastAPI(title="Adult Content Platform API")
 
 # Add session middleware
-app.add_middleware(SessionMiddleware, secret_key=JWT_SECRET)
+# app.add_middleware(SessionMiddleware, secret_key=JWT_SECRET)
 
 # OAuth setup
 oauth = OAuth()
