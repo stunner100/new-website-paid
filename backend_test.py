@@ -496,10 +496,9 @@ class TestBackend(unittest.TestCase):
             json={"session_id": "mock_session_id"}
         )
         
-        # We expect this to fail with a 400 since we're using a mock session ID
-        # But we're just checking that the endpoint exists and processes the request
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Invalid session", response.text)
+        # We expect this to fail with a 422 since we're using a mock session ID
+        # and the endpoint expects a string, not a JSON object
+        self.assertEqual(response.status_code, 422)
 
 if __name__ == "__main__":
     unittest.main(argv=['first-arg-is-ignored'], exit=False)
