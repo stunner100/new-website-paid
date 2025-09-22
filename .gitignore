@@ -27,10 +27,15 @@ next-env.d.ts
 
 # Production builds
 /build
+frontend/build/
 dist/
 dist
 
 # Environment files (comprehensive coverage)
+.env
+*/.env
+*.env.local
+*/.env.local
 
 *token.json*
 *credentials.json*
@@ -78,3 +83,8 @@ agenthub/agents/youtube/db
 
 # Mobile development
 android-sdk/ 
+# Local Netlify folder
+.netlify
+
+# Project assets to exclude
+uploads/

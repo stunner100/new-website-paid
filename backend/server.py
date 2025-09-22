@@ -20,6 +20,7 @@ import mimetypes
 from authlib.integrations.starlette_client import OAuth
 import httpx
 import shutil
+import re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -33,8 +34,8 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ.get('JWT_SECRET', 'your-secret-key-here')
 
 # Create uploads directory
-uploads_dir = Path("/app/uploads")
-uploads_dir.mkdir(exist_ok=True)
+uploads_dir = (ROOT_DIR.parent / "uploads")
+uploads_dir.mkdir(parents=True, exist_ok=True)
 
 # Create the main app
 app = FastAPI(title="Adult Content Platform API")
@@ -50,6 +51,7 @@ api_router = APIRouter(prefix="/api")
 
 # Security
 security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)
 
 # Models
 class User(BaseModel):
@@ -153,11 +155,15 @@ async def register(user_data: UserRegister):
         raise HTTPException(status_code=400, detail="Email already registered")
     
     # Create user
+    users_count = await db.users.count_documents({})
+    is_first_user = users_count == 0
     user = User(
         email=user_data.email,
         name=user_data.name,
         password_hash=hash_password(user_data.password),
-        age_verified=user_data.age_verified
+        age_verified=user_data.age_verified,
+        is_admin=is_first_user,
+        is_approved=is_first_user
     )
     
     await db.users.insert_one(user.dict())
@@ -232,12 +238,16 @@ async def emergent_login(session_id: str):
     
     if not existing_user:
         # Create new user
+        users_count = await db.users.count_documents({})
+        is_first_user = users_count == 0
         user = User(
             email=user_data["email"],
             name=user_data["name"],
             picture=user_data.get("picture"),
             age_verified=True,  # Assume age verified through Emergent
-            session_token=user_data["session_token"]
+            session_token=user_data["session_token"],
+            is_admin=is_first_user,
+            is_approved=is_first_user
         )
         await db.users.insert_one(user.dict())
     else:
@@ -338,7 +348,21 @@ async def get_video(video_id: str, current_user: User = Depends(get_current_user
     return video_obj
 
 @api_router.get("/videos/{video_id}/stream")
-async def stream_video(video_id: str, current_user: User = Depends(get_current_user)):
+async def stream_video(video_id: str, request: Request, token: Optional[str] = None, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)):
+    # Resolve current user from either query token or Authorization header
+    payload = None
+    if token:
+        payload = verify_token(token)
+    elif credentials and credentials.scheme.lower() == "bearer":
+        payload = verify_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+    user = await db.users.find_one({"id": payload["sub"]})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    current_user = User(**user)
+
     video = await db.videos.find_one({"id": video_id})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -355,22 +379,62 @@ async def stream_video(video_id: str, current_user: User = Depends(get_current_u
         {"$inc": {"views": 1}}
     )
     
-    # Stream file
+    # Stream file with Range support
     file_path = Path(video_obj.file_path)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
-    
-    def iterfile(file_path: Path):
-        with open(file_path, "rb") as file_like:
-            yield from file_like
-    
+
+    file_size = file_path.stat().st_size
     media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-    
-    return StreamingResponse(
-        iterfile(file_path),
-        media_type=media_type,
-        headers={"Content-Disposition": f"inline; filename={video_obj.filename}"}
-    )
+
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    if range_header:
+        # Expected format: bytes=start-end
+        match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if not match:
+            raise HTTPException(status_code=416, detail="Invalid Range header")
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else file_size - 1
+        end = min(end, file_size - 1)
+        if start > end or start >= file_size:
+            raise HTTPException(status_code=416, detail="Requested Range Not Satisfiable")
+        chunk_size = 1024 * 1024  # 1MB
+        length = end - start + 1
+
+        def range_iter(fp: Path, start_pos: int, end_pos: int):
+            with open(fp, "rb") as f:
+                f.seek(start_pos)
+                bytes_remaining = length
+                while bytes_remaining > 0:
+                    read_size = min(chunk_size, bytes_remaining)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    bytes_remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+            "Content-Type": media_type,
+            "Content-Disposition": f"inline; filename={video_obj.filename}"
+        }
+        return StreamingResponse(range_iter(file_path, start, end), status_code=206, headers=headers)
+    else:
+        def iterfile(fp: Path):
+            with open(fp, "rb") as file_like:
+                yield from file_like
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Disposition": f"inline; filename={video_obj.filename}"
+        }
+        return StreamingResponse(
+            iterfile(file_path),
+            media_type=media_type,
+            headers=headers
+        )
 
 @api_router.post("/videos/{video_id}/approve")
 async def approve_video(video_id: str, admin_user: User = Depends(get_admin_user)):
@@ -469,10 +533,34 @@ async def make_admin(user_id: str, admin_user: User = Depends(get_admin_user)):
     return {"message": "User made admin successfully"}
 
 # Include the router in the main app
+@api_router.delete("/videos/{video_id}")
+async def delete_video(video_id: str, admin_user: User = Depends(get_admin_user)):
+    # Find the video record
+    video = await db.videos.find_one({"id": video_id})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Attempt to delete the file from disk, only if it resides under uploads_dir
+    try:
+        file_path = Path(video.get("file_path", ""))
+        if file_path and file_path.exists():
+            # Ensure path is inside uploads_dir to prevent accidental deletion elsewhere
+            if uploads_dir in file_path.parents or file_path == uploads_dir / file_path.name:
+                file_path.unlink()
+            else:
+                logging.warning(f"Refusing to delete file outside uploads dir: {file_path}")
+    except Exception as e:
+        # Log and continue to delete DB record
+        logging.warning(f"Failed to delete file for video {video_id}: {e}")
+
+    # Delete the video document
+    await db.videos.delete_one({"id": video_id})
+    return {"message": "Video deleted successfully"}
+
 app.include_router(api_router)
 
-# Mount uploads directory for serving files
-app.mount("/uploads", StaticFiles(directory="/app/uploads"), name="uploads")
+# Static files for uploads
+app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,

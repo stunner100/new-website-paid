@@ -191,12 +191,16 @@ const AuthForms = () => {
 const VideoPlayer = ({ videoId, onClose }) => {
   const [videoUrl, setVideoUrl] = useState('');
   const [loading, setLoading] = useState(true);
+  const { token } = useAuth();
 
   useEffect(() => {
-    const url = `${API}/videos/${videoId}/stream`;
+    const t = token || localStorage.getItem('token');
+    const url = t
+      ? `${API}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`
+      : `${API}/videos/${videoId}/stream`;
     setVideoUrl(url);
     setLoading(false);
-  }, [videoId]);
+  }, [videoId, token]);
 
   return (
     <div className="video-player-modal">
@@ -206,7 +210,7 @@ const VideoPlayer = ({ videoId, onClose }) => {
           <div className="loading">Loading video...</div>
         ) : (
           <video controls autoPlay className="video-player">
-            <source src={videoUrl} type="video/mp4" />
+            <source src={videoUrl} />
             Your browser does not support the video tag.
           </video>
         )}
@@ -246,47 +250,50 @@ const VideoCard = ({ video, onPlay }) => {
 };
 
 // Upload Form Component
-const UploadForm = ({ onClose, onSuccess }) => {
-  const [formData, setFormData] = useState({
-    title: '',
-    description: '',
-    category: '',
-    tags: ''
-  });
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!file) {
-      setError('Please select a video file');
-      return;
-    }
-
-    setUploading(true);
-    setError('');
-
-    const uploadData = new FormData();
-    uploadData.append('title', formData.title);
-    uploadData.append('description', formData.description);
-    uploadData.append('category', formData.category);
-    uploadData.append('tags', formData.tags);
-    uploadData.append('file', file);
-
-    try {
-      await axios.post(`${API}/videos/upload`, uploadData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
-      onSuccess();
-    } catch (error) {
-      setError(error.response?.data?.detail || 'Upload failed');
-    } finally {
-      setUploading(false);
-    }
-  };
+const UploadForm = ({ onClose, onSuccess, onNotify }) => {
+   const [formData, setFormData] = useState({
+     title: '',
+     description: '',
+     category: '',
+     tags: ''
+   });
+   const [file, setFile] = useState(null);
+   const [uploading, setUploading] = useState(false);
+   const [error, setError] = useState('');
+ 
+   const handleSubmit = async (e) => {
+     e.preventDefault();
+     if (!file) {
+       setError('Please select a video file');
+       onNotify && onNotify('Please select a video file', 'error');
+       return;
+     }
+ 
+     setUploading(true);
+     setError('');
+ 
+     const uploadData = new FormData();
+     uploadData.append('title', formData.title);
+     uploadData.append('description', formData.description);
+     uploadData.append('category', formData.category);
+     uploadData.append('tags', formData.tags);
+     uploadData.append('file', file);
+ 
+     try {
+       await axios.post(`${API}/videos/upload`, uploadData, {
+         headers: {
+           'Content-Type': 'multipart/form-data',
+         },
+       });
+       onNotify && onNotify('Upload successful', 'success');
+       onSuccess();
+     } catch (error) {
+       setError(error.response?.data?.detail || 'Upload failed');
+       onNotify && onNotify(error.response?.data?.detail || 'Upload failed', 'error');
+     } finally {
+       setUploading(false);
+     }
+   };
 
   return (
     <div className="modal-overlay">
@@ -343,6 +350,324 @@ const UploadForm = ({ onClose, onSuccess }) => {
   );
 };
 
+// Admin Panel Component
+const AdminPanel = ({ onClose }) => {
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState('videos');
+  const [videos, setVideos] = useState([]);
+  const [statusFilter, setStatusFilter] = useState('pending');
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  // Toast state for inline notifications within AdminPanel
+  const [toast, setToast] = useState({ message: '', type: '' });
+  const showToast = (message, type = 'info') => {
+    setToast({ message, type });
+    // clear previous timer and auto-hide after 3.5s
+    if (showToast._t) window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => setToast({ message: '', type: '' }), 3500);
+  };
+
+  const loadVideos = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const params = statusFilter === 'all' ? {} : { status: statusFilter };
+      const response = await axios.get(`${API}/videos`, { params });
+      setVideos(response.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load videos');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadUsers = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await axios.get(`${API}/admin/users`);
+      setUsers(response.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load users');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUploadSuccess = async () => {
+    setShowUploadModal(false);
+    setActiveTab('videos');
+    await loadVideos();
+  };
+
+  useEffect(() => {
+    if (activeTab === 'videos') {
+      loadVideos();
+    } else if (activeTab === 'users') {
+      loadUsers();
+    }
+  }, [activeTab, statusFilter]);
+
+  // Guard: if Upload tab is somehow active but user isn't approved or admin, redirect to Videos
+  useEffect(() => {
+    if (activeTab === 'upload' && !user?.is_admin) {
+      setActiveTab('videos');
+    }
+  }, [activeTab, user]);
+
+  const approveVideo = async (id) => {
+    try {
+      await axios.post(`${API}/videos/${id}/approve`);
+      await loadVideos();
+      showToast('Video approved successfully', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to approve video', 'error');
+    }
+  };
+
+  const rejectVideo = async (id) => {
+    try {
+      await axios.post(`${API}/videos/${id}/reject`);
+      await loadVideos();
+      showToast('Video rejected', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to reject video', 'error');
+    }
+  };
+
+  const deleteVideo = async (id) => {
+    if (!window.confirm('Are you sure you want to delete this video? This action cannot be undone.')) return;
+    try {
+      await axios.delete(`${API}/videos/${id}`);
+      await loadVideos();
+      showToast('Video deleted successfully', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to delete video', 'error');
+    }
+  };
+
+  const approveUser = async (id) => {
+    try {
+      await axios.post(`${API}/admin/users/${id}/approve`);
+      await loadUsers();
+      showToast('User approved successfully', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to approve user', 'error');
+    }
+  };
+
+  const makeAdmin = async (id) => {
+    try {
+      await axios.post(`${API}/admin/users/${id}/make-admin`);
+      await loadUsers();
+      showToast('User granted admin privileges', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to make user admin', 'error');
+    }
+  };
+
+  if (!user?.is_admin) {
+    return (
+      <div className="error-container">
+        <h2>Access Denied</h2>
+        <p>You must be an admin to view this page.</p>
+        <button onClick={onClose} className="btn btn-primary">Go Back</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app admin-app">
+      <header className="header">
+        <div className="header-content">
+          <h1 className="logo">Admin Panel</h1>
+          <div className="header-actions">
+            <button onClick={onClose} className="btn btn-secondary">Back</button>
+          </div>
+        </div>
+      </header>
+
+      <section className="search-section">
+        <div className="search-container">
+          <div className="filter-bar">
+            <div className="admin-tabs">
+              <button className={activeTab==='videos'? 'tab active':'tab'} onClick={() => setActiveTab('videos')}>Videos</button>
+              {user?.is_admin && (
+                <button className={activeTab==='upload'? 'tab active':'tab'} onClick={() => setActiveTab('upload')}>Upload</button>
+              )}
+              <button className={activeTab==='users'? 'tab active':'tab'} onClick={() => setActiveTab('users')}>Users</button>
+            </div>
+            {activeTab === 'videos' && (
+              <select 
+                value={statusFilter} 
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="all">All</option>
+              </select>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {activeTab === 'videos' ? (
+        <section className="video-grid">
+          {loading ? (
+            <div className="loading">Loading videos...</div>
+          ) : error ? (
+            <div className="error-message">{error}</div>
+          ) : videos.length === 0 ? (
+            <div className="no-videos">
+              <h3>No videos found</h3>
+              <p>Try a different status filter</p>
+            </div>
+          ) : (
+            <div className="videos-container admin-list">
+              {videos.map((video) => (
+                <div key={video.id} className="video-card admin-card">
+                  <div className="video-info">
+                    <h3>{video.title}</h3>
+                    <p>{video.description}</p>
+                    <div className="video-meta">
+                      <span className="category">{video.category}</span>
+                      <span className="views">{video.views} views</span>
+                      <span className="status">Status: {video.status}</span>
+                    </div>
+                    <div className="video-tags">
+                      {(video.tags || []).map(tag => (
+                        <span key={tag} className="tag">{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="admin-actions">
+                    <button 
+                      className="btn btn-primary" 
+                      onClick={() => approveVideo(video.id)}
+                      disabled={video.status === 'approved'}
+                    >
+                      Approve
+                    </button>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => rejectVideo(video.id)}
+                      disabled={video.status === 'rejected'}
+                    >
+                      Reject
+                    </button>
+                    <button 
+                      className="btn btn-danger" 
+                      onClick={() => deleteVideo(video.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : activeTab === 'users' ? (
+        <section className="user-grid">
+          {loading ? (
+            <div className="loading">Loading users...</div>
+          ) : error ? (
+            <div className="error-message">{error}</div>
+          ) : users.length === 0 ? (
+            <div className="no-users">
+              <h3>No users found</h3>
+            </div>
+          ) : (
+            <div className="users-container admin-list">
+              {users.map((u) => (
+                <div key={u.id} className="user-card admin-card">
+                  <div className="user-info">
+                    <h3>{u.name}</h3>
+                    <p>{u.email}</p>
+                    <div className="user-meta">
+                      <span>Approved: {u.is_approved ? 'Yes' : 'No'}</span>
+                      <span>Admin: {u.is_admin ? 'Yes' : 'No'}</span>
+                    </div>
+                  </div>
+                  <div className="admin-actions">
+                    <button 
+                      className="btn btn-primary" 
+                      onClick={() => approveUser(u.id)}
+                      disabled={u.is_approved}
+                    >
+                      Approve
+                    </button>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => makeAdmin(u.id)}
+                      disabled={u.is_admin}
+                    >
+                      Make Admin
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : (
+        <section className="upload-section">
+          <div className="upload-intro">
+            <h3>Upload New Video</h3>
+            <p>Upload content directly from the admin panel. After a successful upload, you'll be returned to the Videos tab.</p>
+            <button 
+              className="btn btn-primary" 
+              onClick={() => setShowUploadModal(true)}
+              disabled={!user?.is_admin}
+              title={!user?.is_admin ? 'Only admins can upload' : ''}
+            >
+              Open Upload Form
+            </button>
+            {!user?.is_admin && (
+            <p style={{ marginTop: '8px', color: '#ef4444' }}>
+              Only admins can upload.
+            </p>
+            )}
+          </div>
+        </section>
+      )}
+ 
+      {showUploadModal && (
+        <UploadForm 
+          onClose={() => setShowUploadModal(false)} 
+          onSuccess={handleUploadSuccess}
+          onNotify={(msg, type) => showToast(msg, type)}
+        />
+      )}
+
+      {toast.message && (
+        <div
+          className={`toast ${toast.type}`}
+          style={{
+            position: 'fixed',
+            bottom: '24px',
+            right: '24px',
+            background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#374151',
+            color: '#fff',
+            padding: '12px 16px',
+            borderRadius: '8px',
+            boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)',
+            zIndex: 1000,
+            maxWidth: '320px'
+          }}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.message}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Main App Component
 const MainApp = () => {
   const { user, logout } = useAuth();
@@ -351,8 +676,10 @@ const MainApp = () => {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentVideo, setCurrentVideo] = useState(null);
-  const [showUpload, setShowUpload] = useState(false);
+  // Removed standalone upload modal state to unify under AdminPanel only
+  // const [showUpload, setShowUpload] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [showAdmin, setShowAdmin] = useState(false);
 
   useEffect(() => {
     fetchVideos();
@@ -406,6 +733,10 @@ const MainApp = () => {
     return <div className="loading">Loading...</div>;
   }
 
+  if (showAdmin) {
+    return <AdminPanel onClose={() => setShowAdmin(false)} />;
+  }
+
   return (
     <div className="app">
       {/* Header */}
@@ -413,11 +744,12 @@ const MainApp = () => {
         <div className="header-content">
           <h1 className="logo">AdultFlix</h1>
           <div className="header-actions">
-            {user.is_approved && (
-              <button onClick={() => setShowUpload(true)} className="btn btn-primary">
-                Upload Video
+            {user.is_admin && (
+              <button onClick={() => setShowAdmin(true)} className="btn btn-secondary">
+                Admin Panel
               </button>
             )}
+            {/* Removed standalone Upload button; uploads are available inside Admin Panel */}
             <div className="user-menu">
               <span>Welcome, {user.name}</span>
               <button onClick={logout} className="btn btn-secondary">Logout</button>
@@ -492,12 +824,13 @@ const MainApp = () => {
         />
       )}
 
-      {showUpload && (
+      {/* Removed standalone Upload modal; UploadForm is accessible via AdminPanel */}
+      {/* {showUpload && (
         <UploadForm
           onClose={() => setShowUpload(false)}
           onSuccess={handleUploadSuccess}
         />
-      )}
+      )} */}
     </div>
   );
 };
@@ -522,13 +855,12 @@ const AuthCallback = () => {
         }
 
         // Exchange session ID for user data
-        const response = await axios.post(`${API}/auth/emergent-login`, sessionId, {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
+        const response = await axios.post(`${API}/auth/emergent-login?session_id=${encodeURIComponent(sessionId)}`);
 
         login(response.data.access_token, response.data.user);
+        // Redirect to home after successful login
+        window.location.replace('/');
+        return;
       } catch (error) {
         setError(error.response?.data?.detail || 'Authentication failed');
       } finally {
