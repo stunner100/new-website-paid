@@ -7,12 +7,6 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# Ensure direct function URLs are not rewritten by the SPA fallback
-[[redirects]]
-  from = "/.netlify/functions/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
-
 # Proxy API requests to Netlify Functions
 [[redirects]]
   from = "/api/*"
