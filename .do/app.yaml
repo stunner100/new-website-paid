@@ -1,0 +1,33 @@
+name: new-website-paid
+region: nyc
+services:
+  - name: backend
+    environment_slug: python
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    http_port: 8080
+    run_command: uvicorn server:app --host 0.0.0.0 --port 8080
+    source_dir: backend
+    routes:
+      - path: /api
+    envs:
+      - key: MONGO_URL
+        scope: RUN_AND_BUILD_TIME
+        value: ""
+      - key: DB_NAME
+        scope: RUN_AND_BUILD_TIME
+        value: ""
+      - key: JWT_SECRET
+        scope: RUN_AND_BUILD_TIME
+        value: ""
+static_sites:
+  - name: frontend
+    source_dir: frontend
+    build_command: yarn install && yarn build
+    output_dir: build
+    routes:
+      - path: /
+    envs:
+      - key: REACT_APP_BACKEND_URL
+        scope: BUILD_TIME
+        value: ""
