@@ -3,7 +3,7 @@ import './App.css';
 import axios from 'axios';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
 
 // Auth Context
 const AuthContext = createContext();
@@ -249,6 +249,10 @@ const VideoCard = ({ video, onPlay }) => {
   );
 };
 
+// Add configurable max upload size (in MB) with a safe default
+const MAX_UPLOAD_MB = Number(process.env.REACT_APP_MAX_UPLOAD_MB || 200);
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
 // Upload Form Component
 const UploadForm = ({ onClose, onSuccess, onNotify }) => {
    const [formData, setFormData] = useState({
@@ -259,7 +263,23 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
    });
    const [file, setFile] = useState(null);
    const [uploading, setUploading] = useState(false);
+   const [uploadProgress, setUploadProgress] = useState(0);
    const [error, setError] = useState('');
+ 
+   const handleFileChange = (e) => {
+     const f = e.target.files && e.target.files[0];
+     if (!f) return;
+     if (f.size > MAX_UPLOAD_BYTES) {
+       const msg = `File is too large. Max allowed is ${MAX_UPLOAD_MB} MB. Selected is ${Math.ceil(f.size / 1024 / 1024)} MB.`;
+       setError(msg);
+       onNotify && onNotify(msg, 'error');
+       e.target.value = '';
+       setFile(null);
+       return;
+     }
+     setFile(f);
+     setError('');
+   };
  
    const handleSubmit = async (e) => {
      e.preventDefault();
@@ -268,8 +288,15 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
        onNotify && onNotify('Please select a video file', 'error');
        return;
      }
+     if (file.size > MAX_UPLOAD_BYTES) {
+       const msg = `File is too large. Max allowed is ${MAX_UPLOAD_MB} MB. Selected is ${Math.ceil(file.size / 1024 / 1024)} MB.`;
+       setError(msg);
+       onNotify && onNotify(msg, 'error');
+       return;
+     }
  
      setUploading(true);
+     setUploadProgress(0);
      setError('');
  
      const uploadData = new FormData();
@@ -284,7 +311,17 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
          headers: {
            'Content-Type': 'multipart/form-data',
          },
+         onUploadProgress: (evt) => {
+           if (evt && typeof evt.loaded === 'number' && typeof evt.total === 'number' && evt.total > 0) {
+             const pct = Math.round((evt.loaded / evt.total) * 100);
+             setUploadProgress(pct);
+           } else {
+             // Fallback if total is not provided
+             setUploadProgress((prev) => (prev < 95 ? prev + 1 : prev));
+           }
+         },
        });
+       setUploadProgress(100);
        onNotify && onNotify('Upload successful', 'success');
        onSuccess();
      } catch (error) {
@@ -332,15 +369,25 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
           <input
             type="file"
             accept="video/*"
-            onChange={(e) => setFile(e.target.files[0])}
+            onChange={handleFileChange}
             required
           />
+          <div style={{ fontSize: '12px', color: '#aaa', marginTop: '4px' }}>Max size: {MAX_UPLOAD_MB} MB</div>
+
+          {uploading && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ height: 8, background: '#333', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${uploadProgress}%`, background: '#e50914', transition: 'width 0.2s ease' }} />
+              </div>
+              <div style={{ marginTop: 6, fontSize: 12, color: '#aaa' }}>{uploadProgress}%</div>
+            </div>
+          )}
           
           <div className="modal-actions">
             <button type="submit" disabled={uploading} className="btn btn-primary">
               {uploading ? 'Uploading...' : 'Upload Video'}
             </button>
-            <button type="button" onClick={onClose} className="btn btn-secondary">
+            <button type="button" onClick={onClose} className="btn btn-secondary" disabled={uploading}>
               Cancel
             </button>
           </div>

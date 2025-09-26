@@ -1,0 +1,25 @@
+[build]
+  publish = "build"
+  command = "yarn build"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# Ensure direct function URLs are not rewritten by the SPA fallback
+[[redirects]]
+  from = "/.netlify/functions/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# Proxy API requests to Netlify Functions
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+# SPA fallback for React Router (must remain last)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
