@@ -6,18 +6,33 @@ import { Client } from "pg";
 import Busboy from "busboy";
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { join } from "path";
 
-const DATABASE_URL = process.env.DATABASE_URL as string;
+// Prefer Netlify's injected Neon connection, fall back to local DATABASE_URL
+const DATABASE_URL = (process.env.NETLIFY_DATABASE_URL || process.env.DATABASE_URL) as string;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 // NEW: Supabase envs
 const SUPABASE_URL = process.env.SUPABASE_URL as string;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "videos";
+const R2_ENDPOINT = process.env.R2_ENDPOINT as string;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID as string;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY as string;
+const R2_BUCKET = process.env.R2_BUCKET || "videos";
+const DEV_ALLOW_ELEVATION = process.env.DEV_ALLOW_ELEVATION === "true";
+const STORAGE_BACKEND = (process.env.STORAGE_BACKEND || "auto").toLowerCase();
 
 function json(statusCode: number, body: any, headers: Record<string, string> = {}) {
   return {
     statusCode,
-    headers: { "content-type": "application/json", ...headers },
+    headers: { 
+      "content-type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      ...headers 
+    },
     body: JSON.stringify(body),
   };
 }
@@ -161,6 +176,11 @@ export const handler: Handler = async (event) => {
     const method = event.httpMethod;
     const path = getPath(event.path || "/");
 
+    // Handle CORS preflight requests
+    if (method === "OPTIONS") {
+      return json(200, {});
+    }
+
     if (method === "GET" && path === "/api/health") {
       try {
         const client = await getClient();
@@ -172,6 +192,50 @@ export const handler: Handler = async (event) => {
         }
       } catch {
         return json(200, { ok: true, db: false });
+      }
+    }
+
+    // Direct-to-R2: request presigned PUT URL
+    if (method === "POST" && path === "/api/uploads/presign") {
+      try {
+        await ensureSchema();
+        const { userId } = await requireAdmin(event);
+        if (!useR2()) {
+          return json(400, { detail: "R2 not configured" });
+        }
+        const body = event.body ? JSON.parse(event.body) : {};
+        const rawName = (body.filename || "upload.mp4").toString();
+        const contentType = (body.contentType || "application/octet-stream").toString();
+        const safeName = sanitizeFilename(rawName);
+        const storageKey = `${userId}/${randomUUID()}_${safeName}`;
+
+        const s3 = await getS3();
+        const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+        const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+        const cmd = new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: storageKey
+        });
+        const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 * 10 });
+        
+        console.log("Generated presigned URL for:", storageKey);
+        console.log("URL domain:", new URL(uploadUrl).hostname);
+        
+        return json(200, {
+          uploadUrl,
+          storageKey,
+          debug: {
+            bucket: R2_BUCKET,
+            endpoint: R2_ENDPOINT,
+            storageKey,
+            contentType
+          },
+          corsNote: "If upload fails with CORS error, configure R2 bucket CORS to allow your domain"
+        });
+      } catch (e: any) {
+        console.error("Presign error:", e);
+        const code = e?.message === "Unauthorized" ? 401 : e?.message === "Forbidden" ? 403 : 500;
+        return json(code, { detail: e?.message || "Failed to presign", error: e?.stack });
       }
     }
 
@@ -212,7 +276,7 @@ export const handler: Handler = async (event) => {
           [email]
         );
         if (!rows[0]) return json(400, { detail: "Invalid credentials" });
-        const ok = await bcrypt.compare(rows[0].password_hash ? password : "", rows[0].password_hash);
+        const ok = await bcrypt.compare(password, rows[0].password_hash);
         if (!ok) return json(400, { detail: "Invalid credentials" });
         const { password_hash, ...user } = rows[0];
         const token = signToken({ sub: user.id });
@@ -247,6 +311,44 @@ export const handler: Handler = async (event) => {
 
     // =================== Videos & Storage (Supabase) ===================
 
+    // Add Cloudflare R2 helpers after Supabase client
+    async function getS3() {
+      const { S3Client } = await import("@aws-sdk/client-s3");
+      return new S3Client({
+        region: "auto",
+        endpoint: R2_ENDPOINT,
+        forcePathStyle: true,
+            credentials: {
+          accessKeyId: R2_ACCESS_KEY_ID,
+          secretAccessKey: R2_SECRET_ACCESS_KEY,
+        },
+      } as any);
+    }
+
+    function useR2() {
+      console.log("DEBUG: STORAGE_BACKEND =", STORAGE_BACKEND);
+      console.log("DEBUG: R2 credentials present =", !!(R2_ENDPOINT && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY));
+      if (STORAGE_BACKEND === "supabase") return false;
+      if (STORAGE_BACKEND === "local") return false;
+      if (STORAGE_BACKEND === "r2") return !!(R2_ENDPOINT && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+      // auto: prefer R2 when configured
+      return !!(R2_ENDPOINT && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+    }
+
+    function useSupabase() {
+      if (STORAGE_BACKEND === "r2") return false;
+      if (STORAGE_BACKEND === "local") return false;
+      if (STORAGE_BACKEND === "supabase") return !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+      // auto: fallback to supabase if R2 not configured
+      return !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+    }
+
+    function useLocalStorage() {
+      if (STORAGE_BACKEND === "local") return true;
+      // auto: fallback to local if neither R2 nor Supabase are configured
+      return !useR2() && !useSupabase();
+    }
+
     // Upload video (admin only, multipart form-data)
     if (method === "POST" && path === "/api/videos/upload") {
       await ensureSchema();
@@ -263,14 +365,88 @@ export const handler: Handler = async (event) => {
           .filter(Boolean);
         if (!title || !description || !category) return json(400, { detail: "Missing fields" });
 
-        const sb = getSupabase();
+        // Upload to storage and get storageKey
         const safeName = sanitizeFilename(file.filename || "upload.mp4");
         const storageKey = `${userId}/${randomUUID()}_${safeName}`;
-        const { error: upErr } = await sb.storage.from(SUPABASE_BUCKET).upload(storageKey, file.data, {
-          contentType: file.mimetype || "application/octet-stream",
-          upsert: false,
-        });
-        if (upErr) return json(500, { detail: "Upload failed", error: upErr.message });
+        
+        if (useR2()) {
+          try {
+            const s3 = await getS3();
+            // Use AWS SDK directly for server-side upload (no CORS issues)
+            const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+            const cmd = new PutObjectCommand({
+              Bucket: R2_BUCKET,
+              Key: storageKey,
+              ContentType: file.mimetype || "application/octet-stream",
+              Body: file.data,
+              Metadata: {
+                'uploaded-via': 'server-side',
+                'original-filename': file.filename || 'unknown'
+              }
+            });
+            
+            console.log("Uploading to R2 via server-side SDK:", storageKey);
+            const result = await s3.send(cmd);
+            console.log("R2 upload successful:", result.ETag);
+          } catch (err: any) {
+            console.error("R2 server-side upload error:", err?.message || err);
+            if (useSupabase()) {
+              const sb = getSupabase();
+              const { error: upErr } = await sb.storage.from(SUPABASE_BUCKET).upload(storageKey, file.data, {
+                contentType: file.mimetype || "application/octet-stream",
+                upsert: false,
+              });
+              if (upErr) return json(500, { detail: "Upload failed", error: upErr.message });
+            } else {
+              // Local file storage fallback
+              console.log("Using local file storage for:", storageKey);
+              try {
+                // Go up one level from frontend directory to project root
+                const projectRoot = join(process.cwd(), "..");
+                const uploadsDir = join(projectRoot, "uploads");
+                const userDir = join(uploadsDir, String(userId));
+                
+                // Create directories if they don't exist
+                if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+                if (!existsSync(userDir)) mkdirSync(userDir, { recursive: true });
+                
+                const filePath = join(userDir, `${randomUUID()}_${safeName}`);
+                writeFileSync(filePath, file.data);
+                console.log("File saved locally to:", filePath);
+              } catch (err: any) {
+                console.error("Local storage error:", err?.message || err);
+                return json(500, { detail: "Local storage failed", error: err?.message || "Unknown error" });
+              }
+            }
+          }
+        } else if (useSupabase()) {
+          const sb = getSupabase();
+          const { error: upErr } = await sb.storage.from(SUPABASE_BUCKET).upload(storageKey, file.data, {
+            contentType: file.mimetype || "application/octet-stream",
+            upsert: false,
+          });
+          if (upErr) return json(500, { detail: "Upload failed", error: upErr.message });
+        } else {
+          // Local file storage fallback
+          console.log("Using local file storage for:", storageKey);
+          try {
+            // Go up one level from frontend directory to project root
+            const projectRoot = join(process.cwd(), "..");
+            const uploadsDir = join(projectRoot, "uploads");
+            const userDir = join(uploadsDir, String(userId));
+            
+            // Create directories if they don't exist
+            if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+            if (!existsSync(userDir)) mkdirSync(userDir, { recursive: true });
+            
+            const filePath = join(userDir, `${randomUUID()}_${safeName}`);
+            writeFileSync(filePath, file.data);
+            console.log("File saved locally to:", filePath);
+          } catch (err: any) {
+            console.error("Local storage error:", err?.message || err);
+            return json(500, { detail: "Local storage failed", error: err?.message || "Unknown error" });
+          }
+        }
 
         const client = await getClient();
         try {
@@ -285,8 +461,55 @@ export const handler: Handler = async (event) => {
           await client.end();
         }
       } catch (e: any) {
+        console.error("Upload endpoint error:", {
+          message: e?.message,
+          stack: e?.stack,
+          name: e?.name
+        });
         const msg = e?.message === "Unauthorized" ? 401 : e?.message === "Forbidden" ? 403 : 500;
-        return json(msg as number, { detail: e?.message || "Upload error" });
+        return json(msg as number, { 
+          detail: e?.message || "Upload error",
+          error: e?.stack || e?.toString(),
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    // Create video record after direct-to-R2 upload (admin only)
+    if (method === "POST" && path === "/api/videos") {
+      await ensureSchema();
+      try {
+        const { userId } = await requireAdmin(event);
+        const body = event.body ? JSON.parse(event.body) : {};
+        const title = (body.title || "").toString().trim();
+        const description = (body.description || "").toString().trim();
+        const category = (body.category || "").toString().trim();
+        const storageKey = (body.storageKey || "").toString().trim();
+        let tags: string[] = Array.isArray(body.tags)
+          ? (body.tags as string[]).map((t) => String(t).trim()).filter(Boolean)
+          : String(body.tags || "")
+              .split(",")
+              .map((t: string) => t.trim())
+              .filter(Boolean);
+        if (!title || !description || !category || !storageKey) {
+          return json(400, { detail: "Missing fields" });
+        }
+
+        const client = await getClient();
+        try {
+          const { rows } = await client.query(
+            `insert into videos (title, description, category, tags, status, uploader_id, storage_key)
+             values ($1,$2,$3,$4,$5,$6,$7)
+             returning id, title, description, category, tags, status, views`,
+            [title, description, category, tags, "pending", userId, storageKey]
+          );
+          return json(200, rows[0]);
+        } finally {
+          await client.end();
+        }
+      } catch (e: any) {
+        const code = e?.message === "Unauthorized" ? 401 : e?.message === "Forbidden" ? 403 : 500;
+        return json(code, { detail: e?.message || "Failed to create record" });
       }
     }
 
@@ -368,8 +591,22 @@ export const handler: Handler = async (event) => {
           const { rows } = await client.query(`select storage_key from videos where id=$1`, [id]);
           const storageKey = rows?.[0]?.storage_key as string | undefined;
           if (storageKey) {
-            const sb = getSupabase();
-            await sb.storage.from(SUPABASE_BUCKET).remove([storageKey]);
+            if (useR2()) {
+              const s3 = await getS3();
+              // Use presigned URL + fetch for delete to avoid AWS SDK handshake issues
+              const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+              const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+              const delCmd = new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: storageKey });
+              const delUrl = await getSignedUrl(s3, delCmd, { expiresIn: 60 * 5 });
+              const delRes = await fetch(delUrl, { method: "DELETE", headers: { "x-amz-content-sha256": "UNSIGNED-PAYLOAD" } } as any);
+              if (!delRes.ok) {
+                const text = await (async () => { try { return await delRes.text(); } catch { return ""; } })();
+                return json(500, { detail: "Delete failed", error: `R2 DELETE ${delRes.status} ${text}` });
+              }
+            } else {
+              const sb = getSupabase();
+              await sb.storage.from(SUPABASE_BUCKET).remove([storageKey]);
+            }
           }
           await client.query(`delete from videos where id=$1`, [id]);
           return json(200, { ok: true });
@@ -379,32 +616,185 @@ export const handler: Handler = async (event) => {
       }
     }
 
-    // Stream video (requires auth; approved or admin)
+    // Debug endpoint to check storage_key
     if (method === "GET") {
+      const m = path.match(/^\/api\/videos\/(\d+)\/debug$/);
+      if (m) {
+        const id = Number(m[1]);
+        const client = await getClient();
+        try {
+          const { rows } = await client.query(`select id, title, storage_key, uploader_id from videos where id=$1`, [id]);
+          return json(200, { video: rows?.[0] || null });
+        } finally {
+          await client.end();
+        }
+      }
+    }
+
+    // Temporary endpoint to update storage_key for testing
+    if (method === "POST") {
+      const m = path.match(/^\/api\/videos\/(\d+)\/update-storage-key$/);
+      if (m) {
+        const id = Number(m[1]);
+        const body = JSON.parse(event.body || '{}');
+        const { storage_key } = body;
+        
+        if (!storage_key) {
+          return json(400, { detail: "storage_key is required" });
+        }
+        
+        const client = await getClient();
+        try {
+          await client.query(`update videos set storage_key=$1 where id=$2`, [storage_key, id]);
+          return json(200, { ok: true, message: `Updated video ${id} storage_key to ${storage_key}` });
+        } finally {
+          await client.end();
+        }
+      }
+    }
+
+    // Stream video (public for approved; admin-only for non-approved)
+    if (method === "GET" || method === "HEAD") {
       const m = path.match(/^\/api\/videos\/(\d+)\/stream$/);
       if (m) {
+        console.log(`DEBUG: Streaming request for video ${m[1]}`);
         await ensureSchema();
+        // Make auth optional for streaming; only required to access non-approved videos
         let authInfo: { userId: number; is_admin: boolean } | null = null;
         try {
           authInfo = await requireAuth(event);
-        } catch {
-          return json(401, { detail: "Invalid token" });
+          console.log(`DEBUG: Auth successful for user ${authInfo.userId}, admin: ${authInfo.is_admin}`);
+        } catch (e) {
+          console.log(`DEBUG: Proceeding without auth for public stream`);
         }
         const id = Number(m[1]);
         const client = await getClient();
         try {
           const { rows } = await client.query(`select status, storage_key from videos where id=$1`, [id]);
           const v = rows?.[0];
-          if (!v) return json(404, { detail: "Not found" });
-          if (v.status !== "approved" && !authInfo?.is_admin) return json(403, { detail: "Forbidden" });
-          const sb = getSupabase();
-          const { data, error } = await sb.storage.from(SUPABASE_BUCKET).createSignedUrl(v.storage_key, 60 * 60);
-          if (error || !data?.signedUrl) return json(500, { detail: "Failed to sign URL", error: error?.message });
-          return {
-            statusCode: 302,
-            headers: { Location: data.signedUrl },
-            body: "",
-          } as any;
+          console.log(`DEBUG: Video query result:`, v);
+          if (!v) {
+            console.log(`DEBUG: Video ${id} not found in database`);
+            return json(404, { detail: "Not found" });
+          }
+          if (v.status !== "approved" && !authInfo?.is_admin) {
+            console.log(`DEBUG: Video ${id} not approved and user not admin. Status: ${v.status}, Admin: ${authInfo?.is_admin}`);
+            return json(403, { detail: "Forbidden" });
+          }
+          let redirectUrl: string | null = null;
+          if (useR2()) {
+            const s3 = await getS3();
+            const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+            const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+            const cmd = new GetObjectCommand({ Bucket: R2_BUCKET, Key: v.storage_key });
+            redirectUrl = await getSignedUrl(s3, cmd, { expiresIn: 60 * 60 });
+          } else if (useSupabase()) {
+            const sb = getSupabase();
+            // Instead of redirecting, proxy the file directly to avoid cross-origin/media issues
+            if (method === 'HEAD') {
+              const { data, error } = await sb.storage.from(SUPABASE_BUCKET).createSignedUrl(v.storage_key, 60 * 60);
+              if (error || !data?.signedUrl) return json(404, { detail: 'Video not found' });
+              return {
+                statusCode: 200,
+                headers: {
+                  'Accept-Ranges': 'bytes',
+                  'Cache-Control': 'public, max-age=60'
+                },
+                body: ''
+              } as any;
+            }
+            const dl = await sb.storage.from(SUPABASE_BUCKET).download(v.storage_key);
+            if (dl.error || !dl.data) return json(500, { detail: 'Failed to download from storage', error: dl.error?.message });
+            const buf = Buffer.from(await dl.data.arrayBuffer());
+            const total = buf.length;
+            const rangeHeader = event.headers?.range || event.headers?.Range;
+            const mimeType = v.storage_key.endsWith('.mp4') ? 'video/mp4' : 
+                             v.storage_key.endsWith('.mov') ? 'video/quicktime' : 
+                             v.storage_key.endsWith('.avi') ? 'video/x-msvideo' : 
+                             'video/mp4';
+            // Handle HTTP Range requests for streaming
+            if (rangeHeader && /^bytes=\d*-\d*$/.test(String(rangeHeader))) {
+              const m = String(rangeHeader).match(/bytes=(\d*)-(\d*)/);
+              let start = m && m[1] ? parseInt(m[1], 10) : 0;
+              let end = m && m[2] ? parseInt(m[2], 10) : total - 1;
+              if (isNaN(start) || start < 0) start = 0;
+              if (isNaN(end) || end >= total) end = total - 1;
+              if (end < start) end = Math.min(start + 1024 * 1024, total - 1); // ensure sane range
+              const chunk = buf.subarray(start, end + 1);
+              return {
+                statusCode: 206,
+                headers: {
+                  'Content-Type': mimeType,
+                  'Content-Length': String(chunk.length),
+                  'Content-Range': `bytes ${start}-${end}/${total}`,
+                  'Accept-Ranges': 'bytes',
+                  'Cache-Control': 'public, max-age=60'
+                },
+                body: chunk.toString('base64'),
+                isBase64Encoded: true
+              } as any;
+            }
+            // No Range header: return full content
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': mimeType,
+                'Content-Length': String(total),
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'public, max-age=3600'
+              },
+              body: buf.toString('base64'),
+              isBase64Encoded: true
+            } as any;
+          } else {
+            // Local storage: serve file directly
+            const { readFileSync, existsSync } = await import("fs");
+            // Go up one level from frontend directory to project root
+            const projectRoot = join(process.cwd(), "..");
+            const uploadsDir = join(projectRoot, "uploads");
+            
+            // Try new format first (with user subdirectory)
+            let filePath = join(uploadsDir, v.storage_key);
+            
+            // If file doesn't exist, try old format (direct in uploads)
+            if (!existsSync(filePath)) {
+              // Extract just the filename from storage_key (remove user directory part)
+              const filename = v.storage_key.includes('/') ? v.storage_key.split('/').pop() : v.storage_key;
+              filePath = join(uploadsDir, filename);
+              console.log(`Trying old format path: ${filePath}`);
+            }
+            
+            try {
+              const fileData = readFileSync(filePath);
+              const mimeType = v.storage_key.endsWith('.mp4') ? 'video/mp4' : 
+                             v.storage_key.endsWith('.mov') ? 'video/quicktime' : 
+                             v.storage_key.endsWith('.avi') ? 'video/x-msvideo' : 
+                             'video/mp4';
+              
+              return {
+                statusCode: 200,
+                headers: {
+                  'Content-Type': mimeType,
+                  'Content-Length': String(fileData.length),
+                  'Accept-Ranges': 'bytes',
+                  'Cache-Control': 'public, max-age=3600'
+                },
+                body: fileData.toString('base64'),
+                isBase64Encoded: true
+              } as any;
+            } catch (err: any) {
+              console.error("Local file read error:", err?.message || err);
+              return json(500, { detail: "File not found", error: err?.message || "Unknown error" });
+            }
+          }
+          // For R2, we still redirect to a signed URL to leverage edge delivery
+          if (redirectUrl) {
+            return {
+              statusCode: 302,
+              headers: { Location: redirectUrl },
+              body: "",
+            } as any;
+          }
         } finally {
           await client.end();
         }
@@ -496,6 +886,228 @@ export const handler: Handler = async (event) => {
         } finally {
           await client.end();
         }
+      }
+    }
+
+    // Dev-only: promote current user to admin (requires JWT, gated by DEV_ALLOW_ELEVATION)
+    if (method === "POST" && path === "/api/dev/make-admin") {
+      if (!DEV_ALLOW_ELEVATION) {
+        return json(404, { detail: "Not found" });
+      }
+      await ensureSchema();
+      try {
+        const { userId } = await requireAuth(event);
+        const client = await getClient();
+        try {
+          await client.query(`update users set is_admin=true, is_approved=true where id=$1`, [userId]);
+          return json(200, { ok: true });
+        } finally {
+          await client.end();
+        }
+      } catch (e: any) {
+        const code = e?.message === "Unauthorized" ? 401 : 500;
+        return json(code, { detail: e?.message || "Failed to elevate" });
+      }
+    }
+
+    // Production admin elevation: promote user by email (no auth required, for initial setup)
+    if (method === "POST" && path === "/api/admin/bootstrap") {
+      await ensureSchema();
+      try {
+        const body = event.body ? JSON.parse(event.body) : {};
+        const { email, secret } = body;
+        
+        // Simple secret check - you can set ADMIN_BOOTSTRAP_SECRET in Netlify env vars
+        const expectedSecret = process.env.ADMIN_BOOTSTRAP_SECRET;
+        if (!expectedSecret || secret !== expectedSecret) {
+          return json(403, { detail: "Invalid secret" });
+        }
+        
+        if (!email) {
+          return json(400, { detail: "Email required" });
+        }
+        
+        const client = await getClient();
+        try {
+          const { rows } = await client.query(
+            `update users set is_admin=true, is_approved=true where email=$1 returning id, email, is_admin`,
+            [email]
+          );
+          if (rows.length === 0) {
+            return json(404, { detail: "User not found" });
+          }
+          return json(200, { user: rows[0], message: "User elevated to admin" });
+        } finally {
+          await client.end();
+        }
+      } catch (e: any) {
+        return json(500, { detail: e?.message || "Bootstrap failed" });
+      }
+    }
+    // Dev-only: create video DB record using storageKey (bypass server-side upload)
+    if (method === "POST" && path === "/api/dev/videos/create") {
+      if (!DEV_ALLOW_ELEVATION) {
+        return json(404, { detail: "Not found" });
+      }
+      await ensureSchema();
+      try {
+        const { userId } = await requireAdmin(event);
+        const { fields } = await parseMultipart(event);
+        const title = fields.title?.trim();
+        const description = fields.description?.trim();
+        const category = fields.category?.trim();
+        const storageKey = fields.storageKey?.trim();
+        const tags = (fields.tags || "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
+        if (!title || !description || !category || !storageKey) {
+          return json(400, { detail: "Missing fields" });
+        }
+        const client = await getClient();
+        try {
+          const { rows } = await client.query(
+            `insert into videos (title, description, category, tags, status, uploader_id, storage_key)
+             values ($1,$2,$3,$4,$5,$6,$7)
+             returning id, title, description, category, tags, status, views`,
+            [title, description, category, tags, "pending", userId, storageKey]
+          );
+          return json(200, rows[0]);
+        } finally {
+          await client.end();
+        }
+      } catch (e: any) {
+        const code = e?.message === "Unauthorized" ? 401 : 500;
+        return json(code, { detail: e?.message || "Failed to create record" });
+      }
+    }
+
+    // Dev-only: delete video DB record by id (skip storage deletion)
+    if (method === "POST" && path === "/api/dev/videos/delete-db") {
+      if (!DEV_ALLOW_ELEVATION) {
+        return json(404, { detail: "Not found" });
+      }
+      await ensureSchema();
+      try {
+        await requireAdmin(event);
+        const { fields } = await parseMultipart(event);
+        const id = Number(fields.id);
+        if (!id) return json(400, { detail: "Missing id" });
+        const client = await getClient();
+        try {
+          await client.query(`delete from videos where id=$1`, [id]);
+          return json(200, { ok: true });
+        } finally {
+          await client.end();
+        }
+      } catch (e: any) {
+        const code = e?.message === "Unauthorized" ? 401 : 500;
+        return json(code, { detail: e?.message || "Failed to delete record" });
+      }
+    }
+
+    // Dev-only: migrate local uploads to Supabase and normalize storage_key
+    if (method === "POST" && path === "/api/dev/migrate-supabase") {
+      if (!DEV_ALLOW_ELEVATION) {
+        return json(404, { detail: "Not found" });
+      }
+      await ensureSchema();
+
+      // Ensure Supabase is configured
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+        return json(400, { detail: "Supabase env missing" });
+      }
+
+      // Helper to guess content type
+      function guessContentType(name: string) {
+        const lower = name.toLowerCase();
+        if (lower.endsWith('.mp4')) return 'video/mp4';
+        if (lower.endsWith('.mov')) return 'video/quicktime';
+        if (lower.endsWith('.avi')) return 'video/x-msvideo';
+        if (lower.endsWith('.mkv')) return 'video/x-matroska';
+        return 'application/octet-stream';
+      }
+
+      const client = await getClient();
+      try {
+        const { rows } = await client.query(`select id, storage_key, uploader_id from videos order by id asc`);
+        // Resolve uploads directory robustly across environments
+        const possibleUploads = [
+          join(process.cwd(), "uploads"),
+          join(process.cwd(), "..", "uploads"),
+          join(process.cwd(), "..", "..", "uploads"),
+        ];
+        const uploadsDir = possibleUploads.find((p) => existsSync(p)) || join(process.cwd(), "..", "uploads");
+        let total = 0, uploaded = 0, skipped = 0, updatedKeys = 0, missing = 0, failed = 0;
+        const sb = getSupabase();
+
+        for (const v of rows) {
+          total++;
+          const id = v.id as number;
+          const storage_key = v.storage_key as string;
+          const uploader_id = v.uploader_id as number;
+
+          // Determine local file path (support new and legacy formats)
+          let candidatePaths: string[] = [];
+          candidatePaths.push(join(uploadsDir, storage_key));
+          const base = storage_key.includes('/') ? storage_key.split('/').pop()! : storage_key;
+          candidatePaths.push(join(uploadsDir, base));
+          candidatePaths.push(join(uploadsDir, String(uploader_id), base));
+
+          let localPath = candidatePaths.find(p => existsSync(p));
+          if (!localPath) {
+            // Fallback: try matching by UUID-only filename patterns
+            // Try matching any UUID present in the storage_key string
+            const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig;
+            const allUuids = storage_key.match(uuidRegex) || [];
+            const exts = ['.mp4', '.MP4', '.mov', '.MOV', '.avi', '.AVI', '.mkv', '.MKV'];
+            for (const uuid of allUuids) {
+              for (const ext of exts) {
+                const byUuid = join(uploadsDir, `${uuid}${ext}`);
+                if (existsSync(byUuid)) {
+                  localPath = byUuid;
+                  break;
+                }
+              }
+              if (localPath) break;
+            }
+            if (!localPath) {
+              console.warn(`[${id}] Missing local file for storage_key=${storage_key}`);
+              missing++;
+              continue;
+            }
+          }
+
+          // Decide Supabase object key
+          const newKey = storage_key.includes('/') ? storage_key : `${uploader_id}/${storage_key}`;
+          const needsUpdate = newKey !== storage_key;
+
+          try {
+            const data = readFileSync(localPath);
+            const contentType = guessContentType(localPath);
+            const { error } = await sb.storage.from(SUPABASE_BUCKET).upload(newKey, data, {
+              contentType,
+              upsert: true,
+            });
+            if (error) {
+              console.error(`[${id}] Upload failed:`, error.message);
+              failed++;
+              continue;
+            }
+            uploaded++;
+            if (needsUpdate) {
+              await client.query('update videos set storage_key=$1, updated_at=now() where id=$2', [newKey, id]);
+              updatedKeys++;
+            }
+          } catch (e: any) {
+            console.error(`[${id}] Migration error:`, e?.message || e);
+            failed++;
+          }
+        }
+
+        return json(200, { total, uploaded, missing, failed, updatedKeys });
+      } finally {
+        await client.end();
       }
     }
 

@@ -88,3 +88,8 @@ android-sdk/
 
 # Project assets to exclude
 uploads/
+
+# local secrets
+frontend/.env
+frontend/env.json
+frontend/env.keys

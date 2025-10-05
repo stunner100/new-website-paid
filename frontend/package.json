@@ -3,15 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.896.0",
+    "@aws-sdk/s3-request-presigner": "^3.896.0",
     "@netlify/functions": "^2.8.1",
+    "@supabase/supabase-js": "^2.46.1",
+    "@neondatabase/serverless": "^0.9.5",
     "axios": "^1.8.4",
     "bcryptjs": "^2.4.3",
+    "busboy": "^1.6.0",
     "cra-template": "1.2.0",
     "hono": "^4.6.10",
+    "jose": "^5.9.3",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0",
-    "@supabase/supabase-js": "^2.46.1",
-    "busboy": "^1.6.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.5.1",
@@ -21,7 +25,10 @@
     "start": "craco start",
     "build": "craco build",
     "test": "craco test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "migrate:supabase": "node scripts/migrate_supabase.js",
+    "pages:dev": "wrangler pages dev build --functions functions --config ../wrangler.toml --local --compatibility-flag=nodejs_compat --persist-to .wrangler/state",
+    "pages:deploy": "wrangler pages deploy build --functions functions --config ../wrangler.toml --project-name bluefilmx --branch production"
   },
   "browserslist": {
     "production": [
@@ -51,6 +58,7 @@
     "netlify-cli": "^23.7.3",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "wrangler": "^3.88.0"
   }
 }

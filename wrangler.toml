@@ -1,0 +1,13 @@
+name = "bluefilmx"
+pages_build_output_dir = "frontend/build"
+compatibility_flags = ["nodejs_compat"]
+
+# R2 binding for Pages Functions (used by server-side fallback and deletes)
+[[r2_buckets]]
+binding = "VIDEOS"
+bucket_name = "bluevideos"
+# Optionally set a different preview bucket
+# preview_bucket_name = "bluevideos"
+
+[vars]
+R2_BUCKET = "bluevideos"

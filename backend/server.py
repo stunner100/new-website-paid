@@ -317,24 +317,31 @@ async def upload_video(
 async def get_videos(
     category: Optional[str] = None,
     status: Optional[str] = None,
-    current_user: User = Depends(get_current_user)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)
 ):
     query = {}
-    
-    # Regular users can only see approved videos
-    if not current_user.is_admin:
+    # Default: anonymous users see only approved videos
+    is_admin = False
+    if credentials and credentials.scheme.lower() == "bearer":
+        payload = verify_token(credentials.credentials)
+        if payload:
+            user = await db.users.find_one({"id": payload["sub"]})
+            if user:
+                is_admin = bool(user.get("is_admin"))
+
+    if not is_admin:
         query["status"] = "approved"
     elif status:
         query["status"] = status
-    
+
     if category:
         query["category"] = category
-    
+
     videos = await db.videos.find(query).sort("created_at", -1).to_list(100)
     return [Video(**video) for video in videos]
 
 @api_router.get("/videos/{video_id}")
-async def get_video(video_id: str, current_user: User = Depends(get_current_user)):
+async def get_video(video_id: str, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)):
     video = await db.videos.find_one({"id": video_id})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -342,26 +349,34 @@ async def get_video(video_id: str, current_user: User = Depends(get_current_user
     video_obj = Video(**video)
     
     # Check permissions
-    if not current_user.is_admin and video_obj.status != "approved":
+    is_admin = False
+    if credentials and credentials.scheme.lower() == "bearer":
+        payload = verify_token(credentials.credentials)
+        if payload:
+            user = await db.users.find_one({"id": payload["sub"]})
+            if user:
+                is_admin = bool(user.get("is_admin"))
+    if not is_admin and video_obj.status != "approved":
         raise HTTPException(status_code=403, detail="Video not available")
     
     return video_obj
 
 @api_router.get("/videos/{video_id}/stream")
 async def stream_video(video_id: str, request: Request, token: Optional[str] = None, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)):
-    # Resolve current user from either query token or Authorization header
-    payload = None
+    # Resolve optional user from either query token or Authorization header
+    current_user: Optional[User] = None
     if token:
         payload = verify_token(token)
+        if payload:
+            user = await db.users.find_one({"id": payload["sub"]})
+            if user:
+                current_user = User(**user)
     elif credentials and credentials.scheme.lower() == "bearer":
         payload = verify_token(credentials.credentials)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid or missing token")
-
-    user = await db.users.find_one({"id": payload["sub"]})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    current_user = User(**user)
+        if payload:
+            user = await db.users.find_one({"id": payload["sub"]})
+            if user:
+                current_user = User(**user)
 
     video = await db.videos.find_one({"id": video_id})
     if not video:
@@ -370,7 +385,7 @@ async def stream_video(video_id: str, request: Request, token: Optional[str] = N
     video_obj = Video(**video)
     
     # Check permissions
-    if not current_user.is_admin and video_obj.status != "approved":
+    if not (current_user and current_user.is_admin) and video_obj.status != "approved":
         raise HTTPException(status_code=403, detail="Video not available")
     
     # Increment views

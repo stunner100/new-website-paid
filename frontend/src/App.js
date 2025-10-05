@@ -3,7 +3,9 @@ import './App.css';
 import axios from 'axios';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
+// Prefer explicit backend URL if provided (avoids Netlify Functions upload limits)
+const isNetlifyDev = typeof window !== 'undefined' && window.location.port === '8888';
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : (isNetlifyDev ? '/api' : '/api');
 
 // Auth Context
 const AuthContext = createContext();
@@ -49,7 +51,7 @@ const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, token }}>
       {children}
     </AuthContext.Provider>
   );
@@ -191,6 +193,7 @@ const AuthForms = () => {
 const VideoPlayer = ({ videoId, onClose }) => {
   const [videoUrl, setVideoUrl] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const { token } = useAuth();
 
   useEffect(() => {
@@ -208,13 +211,86 @@ const VideoPlayer = ({ videoId, onClose }) => {
         <button className="close-button" onClick={onClose}>×</button>
         {loading ? (
           <div className="loading">Loading video...</div>
+        ) : error ? (
+          <div className="error-container">
+            <p>Video failed to load. Try opening directly or another browser.</p>
+            <a href={videoUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">Open video</a>
+          </div>
         ) : (
-          <video controls autoPlay className="video-player">
+          <video
+            className="video-player"
+            controls
+            autoPlay
+            playsInline
+            preload="metadata"
+            onError={() => setError('failed')}
+          >
             <source src={videoUrl} />
             Your browser does not support the video tag.
           </video>
         )}
       </div>
+    </div>
+  );
+};
+
+// Dedicated Video Page Component
+const VideoPage = ({ videoId }) => {
+  const { user, logout } = useAuth();
+  const [videoUrl, setVideoUrl] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const t = localStorage.getItem('token');
+    const url = t
+      ? `${API}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`
+      : `${API}/videos/${videoId}/stream`;
+    setVideoUrl(url);
+    setLoading(false);
+  }, [videoId]);
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="header-content">
+          <h1 className="logo" onClick={() => (window.location.href = '/')}>Bluefilm</h1>
+          <div className="header-actions">
+            <button onClick={() => window.history.back()} className="btn btn-secondary">Back</button>
+            {user && (
+              <div className="user-menu">
+                <span>Welcome, {user.name}</span>
+                <button onClick={logout} className="btn btn-secondary">Logout</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <section className="video-page">
+        <div className="player-wrapper">
+          {loading ? (
+            <div className="loading">Loading video...</div>
+          ) : error ? (
+            <div className="error-container">
+              <p>Video failed to load. Try opening directly or another browser.</p>
+              <a href={videoUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary">Open video</a>
+            </div>
+          ) : (
+            <video
+              className="video-player"
+              controls
+              autoPlay
+              playsInline
+              preload="metadata"
+              onError={() => setError('failed')}
+            >
+              <source src={videoUrl} />
+              Your browser does not support the video tag.
+            </video>
+          )}
+        </div>
+      </section>
     </div>
   );
 };
@@ -281,7 +357,7 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
      setError('');
    };
  
-   const handleSubmit = async (e) => {
+  const handleSubmit = async (e) => {
      e.preventDefault();
      if (!file) {
        setError('Please select a video file');
@@ -294,43 +370,134 @@ const UploadForm = ({ onClose, onSuccess, onNotify }) => {
        onNotify && onNotify(msg, 'error');
        return;
      }
- 
+
      setUploading(true);
      setUploadProgress(0);
      setError('');
- 
-     const uploadData = new FormData();
-     uploadData.append('title', formData.title);
-     uploadData.append('description', formData.description);
-     uploadData.append('category', formData.category);
-     uploadData.append('tags', formData.tags);
-     uploadData.append('file', file);
- 
-     try {
-       await axios.post(`${API}/videos/upload`, uploadData, {
-         headers: {
-           'Content-Type': 'multipart/form-data',
-         },
-         onUploadProgress: (evt) => {
-           if (evt && typeof evt.loaded === 'number' && typeof evt.total === 'number' && evt.total > 0) {
-             const pct = Math.round((evt.loaded / evt.total) * 100);
-             setUploadProgress(pct);
-           } else {
-             // Fallback if total is not provided
-             setUploadProgress((prev) => (prev < 95 ? prev + 1 : prev));
-           }
-         },
-       });
-       setUploadProgress(100);
-       onNotify && onNotify('Upload successful', 'success');
-       onSuccess();
-     } catch (error) {
-       setError(error.response?.data?.detail || 'Upload failed');
-       onNotify && onNotify(error.response?.data?.detail || 'Upload failed', 'error');
-     } finally {
-       setUploading(false);
-     }
-   };
+
+    try {
+      const contentType = file.type || 'application/octet-stream';
+      console.log('Using direct-to-R2 upload via presigned URL');
+
+      // 1) Request a presigned URL from backend
+      const presignRes = await axios.post(`${API}/uploads/presign`, {
+        filename: file.name,
+        contentType
+      });
+      const { uploadUrl, storageKey } = presignRes.data || {};
+      if (!uploadUrl || !storageKey) {
+        throw new Error('Failed to obtain upload URL');
+      }
+
+      // 2) Upload file directly to R2 using XHR (prevents axios default Authorization header)
+      setUploadProgress(5);
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadUrl, true);
+        // Do NOT set Authorization or Content-Type headers; presigned URL handles auth and content type is optional
+        try {
+          const u = new URL(uploadUrl);
+          const signedHeaders = (u.searchParams.get('X-Amz-SignedHeaders') || u.searchParams.get('x-amz-signedheaders') || '').toLowerCase();
+          const checksumAlg = u.searchParams.get('x-amz-checksum-algorithm');
+          // Safe to always send UNSIGNED-PAYLOAD; commonly part of signed headers
+          xhr.setRequestHeader('x-amz-content-sha256', 'UNSIGNED-PAYLOAD');
+          if (checksumAlg && signedHeaders.includes('x-amz-checksum-algorithm')) {
+            xhr.setRequestHeader('x-amz-checksum-algorithm', checksumAlg);
+          }
+        } catch (e) {
+          // ignore parsing errors and proceed without extra headers
+        }
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && e.total) {
+            const progress = Math.round((e.loaded * 100) / e.total);
+            setUploadProgress(progress);
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(null);
+          } else {
+            reject(new Error(`R2 PUT failed: ${xhr.status} ${xhr.statusText}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('R2 PUT network error'));
+        xhr.send(file);
+      });
+
+      // 3) Create the video record in our database
+      const createRes = await axios.post(`${API}/videos`, {
+        title: formData.title,
+        description: formData.description,
+        category: formData.category,
+        tags: formData.tags,
+        storageKey
+      });
+      console.log('Create video response:', createRes.data);
+
+      setUploadProgress(100);
+      onNotify && onNotify('Upload successful', 'success');
+      onSuccess();
+
+    } catch (error) {
+      console.error('Direct upload error:', error);
+      const NETLIFY_FALLBACK_MAX_BYTES = 10 * 1024 * 1024; // Netlify function payload limit ~10MB
+      const shouldFallback =
+        file.size <= NETLIFY_FALLBACK_MAX_BYTES &&
+        (!error?.response || error?.code === 'ERR_NETWORK');
+
+      let message;
+
+      if (shouldFallback) {
+        try {
+          console.log('Falling back to server-side upload');
+          setError('');
+
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('title', formData.title);
+          fd.append('description', formData.description);
+          fd.append('category', formData.category);
+          fd.append('tags', formData.tags);
+
+          setUploadProgress(5);
+          const uploadRes = await axios.post(`${API}/videos/upload`, fd, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+              if (progressEvent.total) {
+                const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                setUploadProgress(progress);
+              }
+            },
+            timeout: 300000
+          });
+
+          console.log('Server-side fallback upload response:', uploadRes.data);
+          setUploadProgress(100);
+          onNotify && onNotify('Upload successful via fallback path', 'success');
+          onSuccess();
+          return;
+        } catch (fallbackErr) {
+          console.error('Server-side fallback upload error:', fallbackErr);
+          message = fallbackErr?.response?.data?.detail
+            || fallbackErr?.message
+            || 'Upload failed';
+        }
+      } else {
+        message = error?.response?.data?.detail
+          || error?.message
+          || (file.size > NETLIFY_FALLBACK_MAX_BYTES
+            ? 'Upload failed. Files over 10MB must use the direct-to-R2 path. Ensure R2 CORS allows https://bluefilmx.com.'
+            : 'Upload failed. If this persists, ensure R2 CORS allows https://bluefilmx.com.');
+      }
+
+      setError(message);
+      onNotify && onNotify(message, 'error');
+    } finally {
+      setUploading(false);
+    }
+
+    return;
+  }
 
   return (
     <div className="modal-overlay">
@@ -772,7 +939,6 @@ const MainApp = () => {
   };
 
   const handleUploadSuccess = () => {
-    setShowUpload(false);
     fetchVideos();
   };
 
@@ -789,18 +955,24 @@ const MainApp = () => {
       {/* Header */}
       <header className="header">
         <div className="header-content">
-          <h1 className="logo">AdultFlix</h1>
+          <h1 className="logo">Bluefilm</h1>
           <div className="header-actions">
-            {user.is_admin && (
+            {user?.is_admin && (
               <button onClick={() => setShowAdmin(true)} className="btn btn-secondary">
                 Admin Panel
               </button>
             )}
             {/* Removed standalone Upload button; uploads are available inside Admin Panel */}
-            <div className="user-menu">
-              <span>Welcome, {user.name}</span>
-              <button onClick={logout} className="btn btn-secondary">Logout</button>
-            </div>
+            {user ? (
+              <div className="user-menu">
+                <span>Welcome, {user.name}</span>
+                <button onClick={logout} className="btn btn-secondary">Logout</button>
+              </div>
+            ) : (
+              <div className="user-menu">
+                <button onClick={() => (window.location.href = '/login')} className="btn btn-primary">Sign In</button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -856,7 +1028,7 @@ const MainApp = () => {
               <VideoCard
                 key={video.id}
                 video={video}
-                onPlay={setCurrentVideo}
+                onPlay={(id) => (window.location.href = `/video/${id}`)}
               />
             ))}
           </div>
@@ -960,16 +1132,22 @@ const AppRouter = () => {
     return <div className="loading">Loading...</div>;
   }
 
+  const path = window.location.pathname;
+
   // Handle auth callback
-  if (window.location.pathname === '/auth/callback') {
+  if (path === '/auth/callback') {
     return <AuthCallback />;
   }
 
+  // Public default: show homepage; only show auth forms on explicit routes
   if (!user) {
-    return <AuthForms />;
+    if (path === '/login' || path === '/register' || path === '/auth') {
+      return <AuthForms />;
+    }
+    // fall through to MainApp for anonymous homepage
   }
 
-  if (!user.age_verified) {
+  if (user && !user.age_verified) {
     return (
       <div className="error-container">
         <h2>Age Verification Required</h2>
@@ -978,10 +1156,16 @@ const AppRouter = () => {
     );
   }
 
+  // Dedicated video route: /video/:id (numeric or UUID)
+  const m = path.match(/^\/video\/([A-Za-z0-9-]+)$/);
+  if (m) {
+    return <VideoPage videoId={m[1]} />;
+  }
+
   return (
     <>
       <MainApp />
-      {showApprovalMessage && !user.is_approved && (
+      {user && showApprovalMessage && !user.is_approved && (
         <div className="approval-banner">
           <p>Your account is pending approval. You can view content but cannot upload videos yet.</p>
           <button onClick={() => setShowApprovalMessage(false)}>×</button>
