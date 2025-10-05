@@ -93,3 +93,6 @@ uploads/
 frontend/.env
 frontend/env.json
 frontend/env.keys
+
+# ignore local wrangler config with secrets
+frontend/wrangler.toml

@@ -1,8 +1,7 @@
 import { Hono } from 'hono'
 import bcrypt from 'bcryptjs'
 import { neon } from '@neondatabase/serverless'
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
+// Note: Avoid AWS SDK in Workers runtime to prevent DOMParser issues
 import * as jose from 'jose'
 
 // Cloudflare Pages Functions binding types
@@ -48,21 +47,85 @@ async function verifyToken(secret: string, token: string) {
   return payload
 }
 
-function s3(c: any) {
-  return new S3Client({
-    region: 'auto',
-    endpoint: c.env.R2_ENDPOINT,
-    forcePathStyle: true,
-    credentials: {
-      accessKeyId: c.env.R2_ACCESS_KEY_ID,
-      secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
-    },
-  } as any)
+// SigV4 helpers for R2 presign (Workers Web Crypto)
+const encoder2 = new TextEncoder()
+async function hmac(key: CryptoKey | ArrayBuffer, data: string | ArrayBuffer): Promise<ArrayBuffer> {
+  const k = key instanceof CryptoKey ? key : await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const bytes = typeof data === 'string' ? encoder2.encode(data) : data
+  return crypto.subtle.sign('HMAC', k, bytes)
+}
+async function getSigningKey(secret: string, date: string, region: string, service: string): Promise<ArrayBuffer> {
+  const kDate = await hmac(encoder2.encode('AWS4' + secret), date)
+  const kRegion = await hmac(kDate, region)
+  const kService = await hmac(kRegion, service)
+  return hmac(kService, 'aws4_request')
+}
+function toHex(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf)
+  return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+async function sha256Hex(data: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', encoder2.encode(data))
+  return toHex(hash)
+}
+function canonicalUri(bucket: string, key: string): string {
+  // Encode each path segment but preserve '/'
+  return `/${bucket}/` + key.split('/').map(encodeURIComponent).join('/')
+}
+function buildQuery(params: Record<string, string>): string {
+  return Object.keys(params).sort().map(k => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`).join('&')
+}
+async function presignR2Url(c: any, method: 'PUT'|'GET', key: string, expiresSeconds: number): Promise<string> {
+  const endpoint = new URL(c.env.R2_ENDPOINT)
+  const host = endpoint.hostname
+  const bucket = c.env.R2_BUCKET
+  const accessKeyId = c.env.R2_ACCESS_KEY_ID
+  const secretAccessKey = c.env.R2_SECRET_ACCESS_KEY
+  const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = String(now.getUTCMonth()+1).padStart(2,'0')
+  const d = String(now.getUTCDate()).padStart(2,'0')
+  const hh = String(now.getUTCHours()).padStart(2,'0')
+  const mm = String(now.getUTCMinutes()).padStart(2,'0')
+  const ss = String(now.getUTCSeconds()).padStart(2,'0')
+  const shortDate = `${y}${m}${d}`
+  const amzDate = `${shortDate}T${hh}${mm}${ss}Z`
+  const region = 'auto'
+  const service = 's3'
+  const credential = `${accessKeyId}/${shortDate}/${region}/${service}/aws4_request`
+  const signedHeaders = 'host'
+  const queryParams: Record<string,string> = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': credential,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(expiresSeconds),
+    'X-Amz-SignedHeaders': signedHeaders,
+  }
+  const canonicalQuery = buildQuery(queryParams)
+  const canonicalHeaders = `host:${host}\n`
+  const canonicalRequest = [
+    method,
+    canonicalUri(bucket, key),
+    canonicalQuery,
+    canonicalHeaders,
+    signedHeaders,
+    'UNSIGNED-PAYLOAD',
+  ].join('\n')
+  const hashedCanonical = await sha256Hex(canonicalRequest)
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    `${shortDate}/${region}/${service}/aws4_request`,
+    hashedCanonical,
+  ].join('\n')
+  const signingKey = await getSigningKey(secretAccessKey, shortDate, region, service)
+  const signature = toHex(await hmac(signingKey, stringToSign))
+  const url = `${endpoint.origin}${canonicalUri(bucket, key)}?${canonicalQuery}&X-Amz-Signature=${signature}`
+  return url
 }
 
 function sql(c: any) {
-  const client = neon(c.env.DATABASE_URL)
-  return (text: string, params?: any[]) => (client as any).unsafe(text, params)
+  return neon(c.env.DATABASE_URL)
 }
 
 async function ensureSchema(c: any) {
@@ -100,7 +163,7 @@ async function requireAuth(c: any) {
   const userId = Number(payload.sub)
   if (!userId) throw new Error('Unauthorized')
   const db = sql(c)
-  const rows = await db(`select id, email, name, age_verified, is_admin, is_approved from users where id=$1`, [userId])
+  const rows = await db`select id, email, name, age_verified, is_admin, is_approved from users where id=${userId}`
   const user = (rows as any)[0]
   if (!user) throw new Error('Unauthorized')
   return { userId, is_admin: !!user.is_admin, user }
@@ -120,10 +183,11 @@ function sanitizeFilename(name: string) {
 app.get('/api/health', async (c) => {
   try {
     const db = sql(c)
-    const rows = await db('select 1 as db')
+    const rows = await db`select 1 as db`
     return json(c, 200, { ok: true, db: (rows as any)[0]?.db === 1 })
-  } catch {
-    return json(c, 200, { ok: true, db: false })
+  } catch (e: any) {
+    console.error('health db error:', e?.message || e)
+    return json(c, 200, { ok: true, db: false, error: e?.message || String(e) })
   }
 })
 
@@ -136,12 +200,9 @@ app.post('/api/auth/register', async (c) => {
   const db = sql(c)
   try {
     const password_hash = await bcrypt.hash(password, 10)
-    const rows = await db(
-      `insert into users (email, name, password_hash, age_verified, is_admin, is_approved)
-       values ($1,$2,$3,$4,$5,$6)
-       returning id, email, name, age_verified, is_admin, is_approved`,
-      [email, name, password_hash, !!age_verified, false, false]
-    )
+    const rows = await db`insert into users (email, name, password_hash, age_verified, is_admin, is_approved)
+       values (${email}, ${name}, ${password_hash}, ${!!age_verified}, ${false}, ${false})
+       returning id, email, name, age_verified, is_admin, is_approved`
     const user = (rows as any)[0]
     const token = await signToken(c.env.JWT_SECRET, { sub: user.id })
     return json(c, 200, { access_token: token, token_type: 'bearer', user })
@@ -157,7 +218,7 @@ app.post('/api/auth/login', async (c) => {
   const { email, password } = body || {}
   if (!email || !password) return json(c, 400, { detail: 'Missing fields' })
   const db = sql(c)
-  const rows = await db(`select id, email, name, password_hash, age_verified, is_admin, is_approved from users where email=$1`, [email])
+  const rows = await db`select id, email, name, password_hash, age_verified, is_admin, is_approved from users where email=${email}`
   const u = (rows as any)[0]
   if (!u) return json(c, 400, { detail: 'Invalid credentials' })
   const ok = await bcrypt.compare(password, u.password_hash)
@@ -174,7 +235,7 @@ app.get('/api/auth/profile', async (c) => {
     if (!token) return json(c, 401, { detail: 'Invalid token' })
     const payload: any = await verifyToken(c.env.JWT_SECRET, token)
     const db = sql(c)
-    const rows = await db(`select id, email, name, age_verified, is_admin, is_approved from users where id=$1`, [payload.sub])
+    const rows = await db`select id, email, name, age_verified, is_admin, is_approved from users where id=${payload.sub}`
     const user = (rows as any)[0]
     if (!user) return json(c, 401, { detail: 'User not found' })
     return json(c, 200, user)
@@ -187,15 +248,13 @@ app.get('/api/auth/profile', async (c) => {
 app.post('/api/uploads/presign', async (c) => {
   try {
     await ensureSchema(c)
-    const { userId } = await requireAdmin(c)
+    const { userId } = await requireAuth(c)
     const body = await c.req.json().catch(() => ({}))
     const rawName = (body.filename || 'upload.mp4').toString()
     const safeName = sanitizeFilename(rawName)
     const storageKey = `${userId}/${crypto.randomUUID()}_${safeName}`
 
-    const client = s3(c)
-    const cmd = new PutObjectCommand({ Bucket: c.env.R2_BUCKET, Key: storageKey })
-    const uploadUrl = await getSignedUrl(client, cmd, { expiresIn: 60 * 10 })
+    const uploadUrl = await presignR2Url(c, 'PUT', storageKey, 600)
     return json(c, 200, { uploadUrl, storageKey })
   } catch (e: any) {
     const code = e?.message === 'Unauthorized' ? 401 : e?.message === 'Forbidden' ? 403 : 500
@@ -228,12 +287,9 @@ app.post('/api/videos/upload', async (c) => {
     const tagsArray = `{${tags.map((t) => '"' + t.replace(/"/g, '\\"') + '"').join(',')}}`
 
     const db = sql(c)
-    const rows = await db(
-      `insert into videos (title, description, category, tags, status, uploader_id, storage_key)
-       values ($1,$2,$3,$4::text[],$5,$6,$7)
-       returning id, title, description, category, tags, status, views`,
-      [title, description, category, tagsArray, 'pending', userId, storageKey]
-    )
+    const rows = await db`insert into videos (title, description, category, tags, status, uploader_id, storage_key)
+       values (${title}, ${description}, ${category}, ${tagsArray}::text[], ${'pending'}, ${userId}, ${storageKey})
+       returning id, title, description, category, tags, status, views`
     return json(c, 200, (rows as any)[0])
   } catch (e: any) {
     const code = e?.message === 'Unauthorized' ? 401 : e?.message === 'Forbidden' ? 403 : 500
@@ -283,22 +339,17 @@ app.get('/api/videos', async (c) => {
   const url = new URL(c.req.url)
   const status = url.searchParams.get('status') || undefined
   const category = url.searchParams.get('category') || undefined
-
-  const where: string[] = []
-  const params: any[] = []
-  if (!isAdmin) {
-    where.push("status='approved'")
-  } else if (status && status !== 'all') {
-    params.push(status)
-    where.push(`status=$${params.length}`)
-  }
-  if (category) {
-    params.push(category)
-    where.push(`category=$${params.length}`)
-  }
-  const whereSql = where.length ? `where ${where.join(' and ')}` : ''
   const db = sql(c)
-  const rows = await db(`select id, title, description, category, tags, status, views from videos ${whereSql} order by created_at desc`, params)
+  let rows: any[] = []
+  if (!isAdmin) {
+    if (category) rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' and category=${category} order by created_at desc`
+    else rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' order by created_at desc`
+  } else {
+    if (status && status !== 'all' && category) rows = await db`select id, title, description, category, tags, status, views from videos where status=${status} and category=${category} order by created_at desc`
+    else if (status && status !== 'all') rows = await db`select id, title, description, category, tags, status, views from videos where status=${status} order by created_at desc`
+    else if (category) rows = await db`select id, title, description, category, tags, status, views from videos where category=${category} order by created_at desc`
+    else rows = await db`select id, title, description, category, tags, status, views from videos order by created_at desc`
+  }
   return json(c, 200, rows)
 })
 
@@ -316,7 +367,7 @@ app.post('/api/videos/:id/:action', async (c) => {
   }
   const newStatus = action === 'approve' ? 'approved' : 'rejected'
   const db = sql(c)
-  await db(`update videos set status=$1, updated_at=now() where id=$2`, [newStatus, id])
+  await db`update videos set status=${newStatus}, updated_at=now() where id=${id}`
   return json(c, 200, { ok: true })
 })
 
@@ -331,12 +382,12 @@ app.delete('/api/videos/:id', async (c) => {
     return json(c, code, { detail: e?.message })
   }
   const db = sql(c)
-  const rows = await db(`select storage_key from videos where id=$1`, [id])
+  const rows = await db`select storage_key from videos where id=${id}`
   const key = (rows as any)[0]?.storage_key as string | undefined
   if (key) {
     await c.env.VIDEOS.delete(key)
   }
-  await db(`delete from videos where id=$1`, [id])
+  await db`delete from videos where id=${id}`
   return json(c, 200, { ok: true })
 })
 
@@ -348,12 +399,11 @@ app.all('/api/videos/:id/stream', async (c) => {
   try { authInfo = await requireAuth(c) } catch {}
   const id = Number(c.req.param('id'))
   const db = sql(c)
-  const rows = await db(`select status, storage_key from videos where id=$1`, [id])
+  const rows = await db`select status, storage_key from videos where id=${id}`
   const v = (rows as any)[0]
   if (!v) return json(c, 404, { detail: 'Not found' })
   if (v.status !== 'approved' && !authInfo?.is_admin) return json(c, 403, { detail: 'Forbidden' })
-  const client = s3(c)
-  const signed = await getSignedUrl(client, new GetObjectCommand({ Bucket: c.env.R2_BUCKET, Key: v.storage_key }), { expiresIn: 60 * 60 })
+  const signed = await presignR2Url(c, 'GET', v.storage_key, 3600)
   return new Response(null, { status: 302, headers: { Location: signed } })
 })
 
@@ -361,7 +411,7 @@ app.all('/api/videos/:id/stream', async (c) => {
 app.get('/api/categories', async (c) => {
   await ensureSchema(c)
   const db = sql(c)
-  const rows = await db(`select distinct category from videos where status='approved' order by category asc`)
+  const rows = await db`select distinct category from videos where status='approved' order by category asc`
   const categories = (rows as any).map((r: any) => r.category)
   return json(c, 200, { categories })
 })
@@ -372,18 +422,18 @@ app.post('/api/search', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const query = (body.query || '').toString()
   const category = body.category ? body.category.toString() : undefined
-  const params: any[] = []
-  let where = "where status='approved'"
-  if (query) {
-    params.push(`%${query}%`)
-    where += ` and (title ilike $${params.length} or description ilike $${params.length})`
-  }
-  if (category) {
-    params.push(category)
-    where += ` and category=$${params.length}`
-  }
   const db = sql(c)
-  const rows = await db(`select id, title, description, category, tags, status, views from videos ${where} order by created_at desc`, params)
+  const like = `%${query}%`
+  let rows: any[]
+  if (query && category) {
+    rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' and (title ilike ${like} or description ilike ${like}) and category=${category} order by created_at desc`
+  } else if (query) {
+    rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' and (title ilike ${like} or description ilike ${like}) order by created_at desc`
+  } else if (category) {
+    rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' and category=${category} order by created_at desc`
+  } else {
+    rows = await db`select id, title, description, category, tags, status, views from videos where status='approved' order by created_at desc`
+  }
   return json(c, 200, rows)
 })
 
@@ -393,6 +443,6 @@ export const onRequest = (context: any) => {
     // Let Pages serve static files and SPA routes
     return context.next()
   }
-  return app.fetch(context.request, context)
+  return app.fetch(context.request, context.env, context)
 }
 export default app
