@@ -104,7 +104,7 @@ function corsOrigin(c: any): string {
   try {
     const u = new URL(origin)
     const host = u.host
-    if (host === 'bluefilmx.com' || host.endsWith('.bluefilmx.pages.dev')) return origin
+    if (host === 'bluefilmx.com' || host === 'www.bluefilmx.com' || host.endsWith('.bluefilmx.pages.dev')) return origin
   } catch {}
   return 'https://bluefilmx.com'
 }
@@ -781,7 +781,7 @@ app.all('/api/videos/:id/stream', async (c) => {
     if (v.status !== 'approved' && !isAdmin) return json(c, 403, { detail: 'Forbidden', code: 'NOT_APPROVED' })
     // Prefer binding streaming by default; enable presign via env flag
     // Default to presigned direct R2 URL for faster TTFB, allow opt-out via env STREAM_PRESIGN=false
-    const usePresign = String(c.env.STREAM_PRESIGN ?? 'true').toLowerCase() !== 'false'
+    const usePresign = String(c.env.STREAM_PRESIGN ?? 'false').toLowerCase() !== 'false'
     if (usePresign) {
       try {
         const signed = await presignR2Url(c, 'GET', v.storage_key, 3600)

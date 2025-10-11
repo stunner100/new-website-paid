@@ -2,10 +2,8 @@ import React, { useState, useEffect, createContext, useContext, useRef } from 'r
 import './App.css';
 import axios from 'axios';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-// Prefer explicit backend URL if provided (avoids Netlify Functions upload limits)
-const isNetlifyDev = typeof window !== 'undefined' && window.location.port === '8888';
-const API = BACKEND_URL ? `${BACKEND_URL}/api` : (isNetlifyDev ? '/api' : '/api');
+// Always use same-origin API in production to avoid cross-origin/CORS issues
+const API = '/api';
 
 // Auth Context
 const AuthContext = createContext();
