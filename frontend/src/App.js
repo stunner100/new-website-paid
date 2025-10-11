@@ -2,8 +2,9 @@ import React, { useState, useEffect, createContext, useContext, useRef } from 'r
 import './App.css';
 import axios from 'axios';
 
-// Always use same-origin API in production to avoid cross-origin/CORS issues
-const API = '/api';
+// Prefer explicit backend URL if provided (allows www to use apex API); fallback to same-origin
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
 
 // Auth Context
 const AuthContext = createContext();
