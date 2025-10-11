@@ -1930,7 +1930,7 @@ const App = () => {
 };
 
 const AppRouter = () => {
-  const { user, loading } = useAuth();
+  const { user, loading, logout } = useAuth();
   const [showApprovalMessage, setShowApprovalMessage] = useState(false);
   const [path, setPath] = useState(window.location.pathname);
 
@@ -1983,14 +1983,7 @@ const AppRouter = () => {
     // fall through to MainApp for anonymous homepage
   }
 
-  if (user && !user.age_verified) {
-    return (
-      <div className="error-container">
-        <h2>Age Verification Required</h2>
-        <p>You must verify your age to access this content.</p>
-      </div>
-    );
-  }
+  // Do not hard-block browsing for unverified users; show a banner instead
 
   // Dedicated video route: /video/:id (numeric or UUID)
   const m = path.match(/^\/video\/([A-Za-z0-9-]+)$/);
@@ -2001,6 +1994,12 @@ const AppRouter = () => {
   return (
     <>
       <MainApp navigate={navigate} />
+      {user && !user.age_verified && (
+        <div className="approval-banner">
+          <p>Age verification pending. You can browse publicly available videos, but some actions may be restricted.</p>
+          <button onClick={() => logout && logout()}>Logout</button>
+        </div>
+      )}
       {user && showApprovalMessage && !user.is_approved && (
         <div className="approval-banner">
           <p>Your account is pending approval. You can view content but cannot upload videos yet.</p>
