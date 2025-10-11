@@ -1923,9 +1923,11 @@ const AuthCallback = () => {
 // Main App Router
 const App = () => {
   return (
-    <AuthProvider>
-      <AppRouter />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <AppRouter />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 };
 
