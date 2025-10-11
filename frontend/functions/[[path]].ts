@@ -91,6 +91,9 @@ async function streamThumbnail(c: any, key: string) {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
+// Memoize schema setup per worker instance to avoid DDL on hot paths
+let __schemaReady = false
+
 // Utilities
 function getClientIp(c: any): string {
   const h = (name: string) => c.req.header(name) || c.req.header(name.toLowerCase()) || ''
@@ -120,6 +123,18 @@ const json = (c: any, status: number, body: any, headers: Record<string, string>
     'Referrer-Policy': 'strict-origin-when-cross-origin',
     ...headers,
   })
+
+// Public-cache helper for GET JSON endpoints to improve TTFB from edge
+function jsonCached(c: any, status: number, body: any, seconds: number, extra: Record<string,string> = {}) {
+  return json(c, status, body, {
+    'Cache-Control': `public, max-age=0, s-maxage=${Math.max(0, seconds)}`,
+    // Use wildcard to maximize cache shareability; safe for GET JSON
+    'Access-Control-Allow-Origin': '*',
+    // Avoid fragmenting cache by origin
+    'Vary': 'Accept-Encoding',
+    ...extra,
+  })
+}
 
 // Admin: list users
 app.get('/api/admin/users', async (c) => {
@@ -293,6 +308,7 @@ function sql(c: any) {
 }
 
 async function ensureSchema(c: any) {
+  if (__schemaReady) return
   const db = sql(c)
   await db`create table if not exists users (
     id bigserial primary key,
@@ -321,6 +337,9 @@ async function ensureSchema(c: any) {
   )`
   // Add optional thumbnail field for custom thumbnails
   await db`alter table videos add column if not exists thumbnail_key text`
+  // Helpful indexes for hot queries
+  try { await db`create index if not exists videos_status_created_at_idx on videos (status, created_at desc)` } catch {}
+  try { await db`create index if not exists videos_category_status_created_at_idx on videos (category, status, created_at desc)` } catch {}
   // Track login attempts per IP+email for rate limiting
   await db`create table if not exists login_attempts (
     email_lower text not null,
@@ -330,6 +349,7 @@ async function ensureSchema(c: any) {
     locked_until timestamptz,
     primary key (email_lower, ip)
   )`
+  __schemaReady = true
 }
 
 async function requireAuth(c: any) {
@@ -601,7 +621,7 @@ app.get('/api/videos', async (c) => {
   let sqlText = `select id, title, description, category, tags, status, views, thumbnail_key from videos ${where} order by created_at desc`
   if (limit) sqlText += ` limit ${limit} offset ${offset}`
   const rows: any[] = await db(sqlText, params)
-  return json(c, 200, rows, { 'X-Total-Count': String(total) })
+  return jsonCached(c, 200, rows, 120, { 'X-Total-Count': String(total) })
 })
 
 // Fetch single video metadata
@@ -836,7 +856,7 @@ app.get('/api/categories', async (c) => {
   const db = sql(c)
   const rows = await db`select distinct category from videos where status='approved' order by category asc`
   const categories = (rows as any).map((r: any) => r.category)
-  return json(c, 200, { categories })
+  return jsonCached(c, 200, { categories }, 300)
 })
 
 // Search
