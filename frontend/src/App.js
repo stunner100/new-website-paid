@@ -481,7 +481,8 @@ const VideoPage = ({ videoId, navigate }) => {
       try {
         const res = await axios.get(`${API}/videos`);
         if (!cancelled) {
-          const all = (res.data || []).filter(v => String(v.id) !== String(videoId));
+          const list = Array.isArray(res.data) ? res.data : [];
+          const all = list.filter(v => String(v.id) !== String(videoId));
           const byCat = meta?.category ? all.filter(v => v.category === meta.category) : all;
           const byCatIds = new Set(byCat.map(v => String(v.id)));
           const fill = all.filter(v => !byCatIds.has(String(v.id)));
@@ -761,7 +762,10 @@ const VideoCard = ({ video, navigate, priority = false }) => {
           <span className="views">{video.views} views</span>
         </div>
         <div className="video-tags">
-          {video.tags.map(tag => (
+          {(Array.isArray(video.tags)
+            ? video.tags
+            : (typeof video.tags === 'string' ? video.tags.split(',').map((t) => t.trim()).filter(Boolean) : [])
+            ).map(tag => (
             <span key={tag} className="tag">{tag}</span>
           ))}
         </div>
@@ -1641,8 +1645,9 @@ const MainApp = ({ navigate }) => {
       };
       const response = await axios.get(`${API}/videos`, { params });
       const totalCount = Number(response.headers['x-total-count'] || 0);
-      setTotal(totalCount || (reset ? response.data.length : total));
-      setVideos((prev) => (reset ? response.data : [...prev, ...response.data]));
+      const data = Array.isArray(response.data) ? response.data : [];
+      setTotal(totalCount || (reset ? data.length : total));
+      setVideos((prev) => (reset ? data : [...prev, ...data]));
     } catch (error) {
       console.error('Failed to fetch videos:', error);
     } finally {
@@ -1653,7 +1658,8 @@ const MainApp = ({ navigate }) => {
   const fetchCategories = async () => {
     try {
       const response = await axios.get(`${API}/categories`);
-      setCategories(response.data.categories);
+      const cats = Array.isArray(response.data?.categories) ? response.data.categories : [];
+      setCategories(cats);
     } catch (error) {
       console.error('Failed to fetch categories:', error);
     }
@@ -1675,9 +1681,10 @@ const MainApp = ({ navigate }) => {
         category: selectedCategory || null
       });
       const totalCount = Number(response.headers['x-total-count'] || 0);
-      setTotal(totalCount || response.data.length);
+      const data = Array.isArray(response.data) ? response.data : [];
+      setTotal(totalCount || data.length);
       setPage(0);
-      setVideos(response.data);
+      setVideos(data);
     } catch (error) {
       console.error('Search failed:', error);
     }
@@ -1794,7 +1801,7 @@ const MainApp = ({ navigate }) => {
               onChange={(e) => setSelectedCategory(e.target.value)}
             >
               <option value="">All Categories</option>
-              {categories.map(category => (
+              {(Array.isArray(categories) ? categories : []).map(category => (
                 <option key={category} value={category}>{category}</option>
               ))}
             </select>
@@ -1830,7 +1837,8 @@ const MainApp = ({ navigate }) => {
                       try {
                         const res = await axios.post(`${API}/search?limit=${pageSize}&offset=${next * pageSize}`,
                           { query: searchQuery, category: selectedCategory || null });
-                        setVideos((prev) => [...prev, ...(res.data || [])]);
+                        const more = Array.isArray(res.data) ? res.data : [];
+                        setVideos((prev) => [...prev, ...more]);
                       } catch {}
                     } else {
                       await fetchVideos(next);
