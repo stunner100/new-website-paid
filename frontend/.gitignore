@@ -1,0 +1,4 @@
+# Ignore environment files and other local artifacts
+.env
+.env.local
+*.env

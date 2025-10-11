@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>R2 CORS Test</title>
+</head>
+<body>
+    <h1>R2 CORS Test</h1>
+    <button onclick="testCORS()">Test CORS</button>
+    <div id="result"></div>
+
+    <script>
+        async function testCORS() {
+            const result = document.getElementById('result');
+            result.innerHTML = 'Testing...';
+            
+            try {
+                // Test OPTIONS request first
+                const optionsResponse = await fetch('https://3a969efa675cb4925f2ec2e72a2310ea.r2.cloudflarestorage.com/bluevideos/', {
+                    method: 'OPTIONS',
+                    headers: {
+                        'Origin': window.location.origin,
+                        'Access-Control-Request-Method': 'PUT',
+                        'Access-Control-Request-Headers': 'content-type,x-amz-content-sha256'
+                    }
+                });
+                
+                result.innerHTML += `<p>OPTIONS Response: ${optionsResponse.status}</p>`;
+                
+                // Check CORS headers
+                const corsHeaders = {
+                    'Access-Control-Allow-Origin': optionsResponse.headers.get('Access-Control-Allow-Origin'),
+                    'Access-Control-Allow-Methods': optionsResponse.headers.get('Access-Control-Allow-Methods'),
+                    'Access-Control-Allow-Headers': optionsResponse.headers.get('Access-Control-Allow-Headers')
+                };
+                
+                result.innerHTML += `<pre>CORS Headers: ${JSON.stringify(corsHeaders, null, 2)}</pre>`;
+                
+            } catch (error) {
+                result.innerHTML += `<p style="color: red;">Error: ${error.message}</p>`;
+                console.error('CORS test error:', error);
+            }
+        }
+    </script>
+</body>
+</html>

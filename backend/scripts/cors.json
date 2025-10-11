@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["https://example.com", "https://www.example.com"],
+    "method": ["GET", "HEAD", "PUT", "POST", "OPTIONS"],
+    "responseHeader": ["Content-Type", "Authorization"],
+    "maxAgeSeconds": 3600
+  }
+]
