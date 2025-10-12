@@ -1792,13 +1792,8 @@ const MainApp = ({ navigate }) => {
       {/* Hero Section */}
       <section className="hero">
         <div className="hero-content">
-          <h1>Blue Film (Bluefilm) • Adult Videos & Porn</h1>
-          <p>Stream high‑quality blue film/bluefilm content in a safe, secure environment.</p>
-          <div style={{ marginTop: 10, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
-            <a className="btn btn-secondary" href="/blue-film">Blue Film</a>
-            <a className="btn btn-secondary" href="/bluefilm">Bluefilm</a>
-            <a className="btn btn-secondary" href="/porn">Porn</a>
-          </div>
+          <h2>Premium Adult Entertainment</h2>
+          <p>Stream high-quality content in a safe, secure environment</p>
         </div>
         <div className="hero-image">
           <img loading="lazy" src="https://images.unsplash.com/photo-1717295248358-4b8f2c8989d6?w=1200&h=400&fit=crop" alt="Premium streaming" />
