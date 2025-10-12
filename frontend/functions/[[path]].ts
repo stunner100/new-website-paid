@@ -880,7 +880,7 @@ app.post('/api/search', async (c) => {
   const where = `where ${whereParts.join(' and ')}`
   const totalRows = await db(`select count(*) as c from videos ${where}`, params)
   const total = Number((totalRows as any)[0]?.c || 0)
-  let sqlText = `select id, title, description, category, tags, status, views from videos ${where} order by created_at desc`
+  let sqlText = `select id, title, description, category, tags, status, views, thumbnail_key from videos ${where} order by created_at desc`
   if (limit) sqlText += ` limit ${limit} offset ${offset}`
   const rows: any[] = await db(sqlText, params)
   return json(c, 200, rows, { 'X-Total-Count': String(total) })
