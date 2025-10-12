@@ -883,7 +883,7 @@ app.post('/api/search', async (c) => {
   let sqlText = `select id, title, description, category, tags, status, views, thumbnail_key from videos ${where} order by created_at desc`
   if (limit) sqlText += ` limit ${limit} offset ${offset}`
   const rows: any[] = await db(sqlText, params)
-  return json(c, 200, rows, { 'X-Total-Count': String(total) })
+  return jsonCached(c, 200, rows, 120, { 'X-Total-Count': String(total) })
 })
 
 // Dynamic sitemap for approved videos (root path)

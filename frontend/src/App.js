@@ -684,9 +684,10 @@ const VideoCard = ({ video, navigate, priority = false }) => {
     if (reduceMotion || saveData) return;
     setPreviewing(true);
     if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    const previewMs = canHover ? 6000 : 3000;
     previewTimerRef.current = setTimeout(() => {
       stopPreview();
-    }, 6000);
+    }, previewMs);
     try { window.__previewBus && window.__previewBus.dispatchEvent(new CustomEvent('preview-start', { detail: { id: previewId } })); } catch {}
   };
 
@@ -752,7 +753,7 @@ const VideoCard = ({ video, navigate, priority = false }) => {
             muted
             playsInline
             autoPlay
-            preload="metadata"
+            preload={saveData ? 'none' : 'metadata'}
             poster={video.thumbnail_key ? `${API}/videos/${video.id}/thumbnail` : undefined}
           />
         ) : video.thumbnail_key ? (
@@ -1634,7 +1635,10 @@ const MainApp = ({ navigate }) => {
   const [videos, setVideos] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState(24);
+  const conn = (typeof navigator !== 'undefined' && navigator.connection) ? navigator.connection : null;
+  const smallScreen = (typeof window !== 'undefined' && window.matchMedia) ? window.matchMedia('(max-width: 480px)').matches : false;
+  const initialPageSize = (smallScreen || (conn && conn.saveData) || (conn && /^(slow-)?2g|3g$/i.test(conn.effectiveType || ''))) ? 12 : 24;
+  const [pageSize, setPageSize] = useState(initialPageSize);
   const [isSearching, setIsSearching] = useState(false);
   const [categories, setCategories] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState('');
