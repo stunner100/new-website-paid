@@ -1792,8 +1792,13 @@ const MainApp = ({ navigate }) => {
       {/* Hero Section */}
       <section className="hero">
         <div className="hero-content">
-          <h2>Premium Adult Entertainment</h2>
-          <p>Stream high-quality content in a safe, secure environment</p>
+          <h1>Blue Film (Bluefilm) • Adult Videos & Porn</h1>
+          <p>Stream high‑quality blue film/bluefilm content in a safe, secure environment.</p>
+          <div style={{ marginTop: 10, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <a className="btn btn-secondary" href="/blue-film">Blue Film</a>
+            <a className="btn btn-secondary" href="/bluefilm">Bluefilm</a>
+            <a className="btn btn-secondary" href="/porn">Porn</a>
+          </div>
         </div>
         <div className="hero-image">
           <img loading="lazy" src="https://images.unsplash.com/photo-1717295248358-4b8f2c8989d6?w=1200&h=400&fit=crop" alt="Premium streaming" />
@@ -2001,6 +2006,35 @@ const AppRouter = () => {
   // DMCA route
   if (path === '/dmca') {
     return <DmcaPolicy />;
+  }
+
+  // SEO landing routes
+  const Landing = ({ title, description }) => (
+    <div className="app page-transition">
+      <header className="header">
+        <div className="header-content">
+          <h1 className="logo" onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>Bluefilmx</h1>
+        </div>
+      </header>
+      <section className="content" style={{ maxWidth: 900, margin: '24px auto', padding: '0 16px', lineHeight: 1.6 }}>
+        <h1 style={{ fontSize: 28 }}>{title}</h1>
+        <p style={{ marginTop: 8 }}>{description}</p>
+        <div style={{ marginTop: 16 }}>
+          <a className="btn btn-primary" href="/">Browse videos</a>
+        </div>
+      </section>
+      <SiteFooter />
+    </div>
+  );
+
+  if (path === '/blue-film') {
+    return <Landing title="Blue Film — Watch Bluefilm Videos Online" description="Explore a curated selection of blue film (bluefilm) adult videos. Stream securely and privately on Bluefilmx." />
+  }
+  if (path === '/bluefilm') {
+    return <Landing title="Bluefilm — Premium Blue Film Videos" description="Find the latest bluefilm content and trending blue film categories. High‑quality playback with fast streaming." />
+  }
+  if (path === '/porn') {
+    return <Landing title="Porn — Adult Videos on Bluefilmx" description="Discover adult videos across popular categories. Safe, fast, and mobile‑friendly streaming." />
   }
 
   // Public default: show homepage; only show auth forms on explicit routes

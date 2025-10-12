@@ -895,6 +895,9 @@ app.get('/sitemap.xml', async (c) => {
     const base = 'https://bluefilmx.com'
     const urls = [
       { loc: `${base}/`, changefreq: 'hourly', priority: '0.8' },
+      { loc: `${base}/blue-film`, changefreq: 'weekly', priority: '0.6' },
+      { loc: `${base}/bluefilm`, changefreq: 'weekly', priority: '0.6' },
+      { loc: `${base}/porn`, changefreq: 'weekly', priority: '0.6' },
     ]
     for (const r of rows) {
       urls.push({ loc: `${base}/video/${r.id}`, lastmod: (r.updated_at || new Date()).toISOString(), changefreq: 'weekly', priority: '0.6' })
