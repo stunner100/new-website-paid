@@ -886,8 +886,44 @@ app.post('/api/search', async (c) => {
   return json(c, 200, rows, { 'X-Total-Count': String(total) })
 })
 
+// Dynamic sitemap for approved videos (root path)
+app.get('/sitemap.xml', async (c) => {
+  try {
+    await ensureSchema(c)
+    const db = sql(c)
+    const rows: any[] = await db`select id, updated_at from videos where status='approved' order by updated_at desc limit 1000`
+    const base = 'https://bluefilmx.com'
+    const urls = [
+      { loc: `${base}/`, changefreq: 'hourly', priority: '0.8' },
+    ]
+    for (const r of rows) {
+      urls.push({ loc: `${base}/video/${r.id}`, lastmod: (r.updated_at || new Date()).toISOString(), changefreq: 'weekly', priority: '0.6' })
+    }
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+      `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+      urls.map(u => {
+        return `<url>` +
+          `<loc>${u.loc}</loc>` +
+          (u.lastmod ? `<lastmod>${u.lastmod}</lastmod>` : '') +
+          (u.changefreq ? `<changefreq>${u.changefreq}</changefreq>` : '') +
+          (u.priority ? `<priority>${u.priority}</priority>` : '') +
+        `</url>`
+      }).join('') +
+      `</urlset>`
+    return new Response(xml, { status: 200, headers: {
+      'content-type': 'application/xml; charset=utf-8',
+      'cache-control': 'public, max-age=0, s-maxage=3600'
+    }})
+  } catch (e: any) {
+    return new Response('<!-- sitemap error -->', { status: 200, headers: { 'content-type': 'application/xml' } })
+  }
+})
+
 export const onRequest = (context: any) => {
   const url = new URL(context.request.url)
+  if (url.pathname === '/sitemap.xml') {
+    return app.fetch(context.request, context.env, context)
+  }
   if (!url.pathname.startsWith('/api/')) {
     // Let Pages serve static files and SPA routes
     return context.next()

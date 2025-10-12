@@ -516,6 +516,23 @@ const VideoPage = ({ videoId, navigate }) => {
       </header>
 
       <section className="video-page">
+        {/* Structured data for SEO */}
+        {meta && (
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: JSON.stringify({
+                '@context': 'https://schema.org',
+                '@type': 'VideoObject',
+                name: meta.title || 'Video',
+                description: meta.description || '',
+                thumbnailUrl: meta.thumbnail_key ? `${API}/videos/${videoId}/thumbnail` : undefined,
+                contentUrl: `${API}/videos/${videoId}/stream`,
+                uploadDate: new Date().toISOString()
+              })
+            }}
+          />
+        )}
         <div className="video-layout">
           <div className="video-main">
             {meta?.title && <h2 className="video-title">{meta.title}</h2>}
