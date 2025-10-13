@@ -1634,7 +1634,10 @@ const MainApp = ({ navigate }) => {
   const { user, logout } = useAuth();
   const [videos, setVideos] = useState([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(0);
+  const getUrlPage = () => {
+    try { const p = Number(new URLSearchParams(window.location.search).get('page') || '1'); return Number.isFinite(p) && p > 0 ? p : 1; } catch { return 1; }
+  };
+  const [page, setPage] = useState(getUrlPage());
   const conn = (typeof navigator !== 'undefined' && navigator.connection) ? navigator.connection : null;
   const smallScreen = (typeof window !== 'undefined' && window.matchMedia) ? window.matchMedia('(max-width: 480px)').matches : false;
   const initialPageSize = (smallScreen || (conn && conn.saveData) || (conn && /^(slow-)?2g|3g$/i.test(conn.effectiveType || ''))) ? 12 : 24;
@@ -1651,25 +1654,50 @@ const MainApp = ({ navigate }) => {
 
   useEffect(() => {
     // reset pagination when filter changes
+    const p = 1;
     setVideos([]);
-    setPage(0);
+    setPage(p);
     setIsSearching(false);
-    fetchVideos(0, true);
+    try { const url = new URL(window.location.href); url.searchParams.set('page', String(p)); navigate(url.pathname + url.search); } catch {}
+    fetchVideos(p, true);
     fetchCategories();
   }, [selectedCategory]);
 
+  // Sync with browser navigation (back/forward on ?page)
+  useEffect(() => {
+    const onPop = () => {
+      const p = getUrlPage();
+      setPage(p);
+      fetchVideos(p, true);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [pageSize, selectedCategory, isSearching, searchQuery]);
+
   const fetchVideos = async (pageToLoad = page, reset = false) => {
     try {
-      const params = {
-        ...(selectedCategory ? { category: selectedCategory } : {}),
-        limit: pageSize,
-        offset: pageToLoad * pageSize,
-      };
-      const response = await axios.get(`${API}/videos`, { params });
-      const totalCount = Number(response.headers['x-total-count'] || 0);
-      const data = Array.isArray(response.data) ? response.data : [];
-      setTotal(totalCount || (reset ? data.length : total));
-      setVideos((prev) => (reset ? data : [...prev, ...data]));
+      const offset = (Math.max(1, pageToLoad) - 1) * pageSize;
+      if (isSearching && searchQuery.trim()) {
+        const response = await axios.post(`${API}/search?limit=${pageSize}&offset=${offset}`, {
+          query: searchQuery,
+          category: selectedCategory || null
+        });
+        const totalCount = Number(response.headers['x-total-count'] || 0);
+        const data = Array.isArray(response.data) ? response.data : [];
+        setTotal(totalCount || (reset ? data.length : total));
+        setVideos(data);
+      } else {
+        const params = {
+          ...(selectedCategory ? { category: selectedCategory } : {}),
+          limit: pageSize,
+          offset
+        };
+        const response = await axios.get(`${API}/videos`, { params });
+        const totalCount = Number(response.headers['x-total-count'] || 0);
+        const data = Array.isArray(response.data) ? response.data : [];
+        setTotal(totalCount || (reset ? data.length : total));
+        setVideos(data);
+      }
     } catch (error) {
       console.error('Failed to fetch videos:', error);
     } finally {
@@ -1691,22 +1719,17 @@ const MainApp = ({ navigate }) => {
     if (!searchQuery.trim()) {
       setIsSearching(false);
       setVideos([]);
-      setPage(0);
-      fetchVideos(0, true);
+      setPage(1);
+      try { const url = new URL(window.location.href); url.searchParams.set('page', '1'); navigate(url.pathname + url.search); } catch {}
+      fetchVideos(1, true);
       return;
     }
 
     try {
       setIsSearching(true);
-      const response = await axios.post(`${API}/search?limit=${pageSize}&offset=0`, {
-        query: searchQuery,
-        category: selectedCategory || null
-      });
-      const totalCount = Number(response.headers['x-total-count'] || 0);
-      const data = Array.isArray(response.data) ? response.data : [];
-      setTotal(totalCount || data.length);
-      setPage(0);
-      setVideos(data);
+      setPage(1);
+      try { const url = new URL(window.location.href); url.searchParams.set('page', '1'); navigate(url.pathname + url.search); } catch {}
+      await fetchVideos(1, true);
     } catch (error) {
       console.error('Search failed:', error);
     }
@@ -1848,29 +1871,25 @@ const MainApp = ({ navigate }) => {
                 priority={idx < 6}
               />
             ))}
-            {(videos.length < total) && (
-              <div style={{ width: '100%', display: 'flex', justifyContent: 'center', marginTop: 16 }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={async () => {
-                    const next = page + 1;
-                    setPage(next);
-                    if (isSearching) {
-                      try {
-                        const res = await axios.post(`${API}/search?limit=${pageSize}&offset=${next * pageSize}`,
-                          { query: searchQuery, category: selectedCategory || null });
-                        const more = Array.isArray(res.data) ? res.data : [];
-                        setVideos((prev) => [...prev, ...more]);
-                      } catch {}
-                    } else {
-                      await fetchVideos(next);
-                    }
-                  }}
-                >
-                  Load more
-                </button>
-              </div>
-            )}
+            {/* Pagination controls */}
+            <div style={{ width: '100%', display: 'flex', justifyContent: 'center', marginTop: 16, gap: 8, alignItems: 'center' }}>
+              {(() => {
+                const totalPages = Math.max(1, Math.ceil(total / pageSize));
+                const canPrev = page > 1;
+                const canNext = page < totalPages;
+                return (
+                  <>
+                    <button className="btn btn-secondary" disabled={!canPrev} onClick={async () => {
+                      const p = page - 1; setPage(p); try { const url = new URL(window.location.href); url.searchParams.set('page', String(p)); navigate(url.pathname + url.search); } catch {} await fetchVideos(p, true);
+                    }}>Prev</button>
+                    <span style={{ color: '#aaa', fontSize: 14 }}>Page {page} of {totalPages}</span>
+                    <button className="btn btn-secondary" disabled={!canNext} onClick={async () => {
+                      const p = page + 1; setPage(p); try { const url = new URL(window.location.href); url.searchParams.set('page', String(p)); navigate(url.pathname + url.search); } catch {} await fetchVideos(p, true);
+                    }}>Next</button>
+                  </>
+                );
+              })()}
+            </div>
           </div>
         )}
       </section>
