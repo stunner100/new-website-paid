@@ -717,20 +717,8 @@ const VideoCard = ({ video, navigate, priority = false }) => {
 
   // Auto preview on mobile (no hover) using IntersectionObserver
   useEffect(() => {
-    if (canHover || reduceMotion || saveData) return; // desktop handles via hover; respect user settings
-    const el = rootRef.current;
-    if (!el || !('IntersectionObserver' in window)) return;
-    const io = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
-          startPreview();
-        } else {
-          stopPreview();
-        }
-      }
-    }, { threshold: [0, 0.6, 1] });
-    io.observe(el);
-    return () => { try { io.disconnect(); } catch {} };
+    // Disabled: no auto preview on mobile
+    return () => {};
   }, [canHover, reduceMotion, saveData]);
 
   return (
