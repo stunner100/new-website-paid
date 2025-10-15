@@ -4,7 +4,15 @@ import axios from 'axios';
 
 // Prefer explicit backend URL if provided (allows www to use apex API); fallback to same-origin
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = BACKEND_URL ? `${BACKEND_URL}/api` : '/api';
+let API = '/api';
+try {
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+  if (BACKEND_URL) {
+    const confHost = new URL(BACKEND_URL).hostname;
+    API = host === confHost ? `${BACKEND_URL}/api` : '/api';
+  }
+} catch { API = '/api'; }
+const MEDIA = '/api';
 
 // Auth Context
 const AuthContext = createContext();
@@ -366,8 +374,8 @@ const VideoPlayer = ({ videoId, onClose }) => {
   useEffect(() => {
     const t = token || localStorage.getItem('token');
     const url = t
-      ? `${API}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`
-      : `${API}/videos/${videoId}/stream`;
+      ? `${MEDIA}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`
+      : `${MEDIA}/videos/${videoId}/stream`;
     setVideoUrl(url);
     setLoading(false);
   }, [videoId, token]);
@@ -438,7 +446,7 @@ const VideoPage = ({ videoId, navigate }) => {
 
   useEffect(() => {
     // Default to same-origin stream without token for caching and faster TTFB
-    setVideoUrl(`${API}/videos/${videoId}/stream`);
+   setVideoUrl(`${MEDIA}/videos/${videoId}/stream`);
     setLoading(false);
     // Detect autoplay flag from query string; reset view tracking on video change
     try {
@@ -466,7 +474,7 @@ const VideoPage = ({ videoId, navigate }) => {
           // For admins previewing non-approved videos, add token to stream URL
           if (res.data?.status !== 'approved' && user) {
             const t = localStorage.getItem('token');
-            if (t) setVideoUrl(`${API}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`);
+           if (t) setVideoUrl(`${MEDIA}/videos/${videoId}/stream?token=${encodeURIComponent(t)}`);
           }
         }
       } catch {}
@@ -526,8 +534,8 @@ const VideoPage = ({ videoId, navigate }) => {
                 '@type': 'VideoObject',
                 name: meta.title || 'Video',
                 description: meta.description || '',
-                thumbnailUrl: meta.thumbnail_key ? `${API}/videos/${videoId}/thumbnail` : undefined,
-                contentUrl: `${API}/videos/${videoId}/stream`,
+                thumbnailUrl: meta.thumbnail_key ? `${MEDIA}/videos/${videoId}/thumbnail` : undefined,
+                contentUrl: `${MEDIA}/videos/${videoId}/stream`,
                 uploadDate: new Date().toISOString()
               })
             }}
@@ -551,7 +559,7 @@ const VideoPage = ({ videoId, navigate }) => {
                 controls
                 playsInline
                 preload="metadata"
-                poster={meta?.thumbnail_key ? `${API}/videos/${videoId}/thumbnail` : undefined}
+            poster={meta?.thumbnail_key ? `${MEDIA}/videos/${videoId}/thumbnail` : undefined}
                 src={videoUrl}
                 onLoadedMetadata={async () => {
                   if (autoplayRef.current && playerRef.current) {
@@ -614,7 +622,7 @@ const VideoPage = ({ videoId, navigate }) => {
                         decoding="async"
                         width={240}
                         height={135}
-                        src={`${API}/videos/${v.id}/thumbnail`}
+                        src={`${MEDIA}/videos/${v.id}/thumbnail`}
                         alt={v.title}
                       />
                     ) : null}
@@ -644,7 +652,7 @@ const VideoCard = ({ video, navigate, priority = false }) => {
   const videoRef = useRef(null);
   const previewTimerRef = useRef(null);
   const rootRef = useRef(null);
-  const previewSrc = `${API}/videos/${video.id}/stream?preview=1`;
+  const previewSrc = `${MEDIA}/videos/${video.id}/stream?preview=1`;
   const canHover = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
   const reduceMotion = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const saveData = typeof navigator !== 'undefined' && navigator.connection && navigator.connection.saveData;
@@ -742,7 +750,7 @@ const VideoCard = ({ video, navigate, priority = false }) => {
             playsInline
             autoPlay
             preload={saveData ? 'none' : 'metadata'}
-            poster={video.thumbnail_key ? `${API}/videos/${video.id}/thumbnail` : undefined}
+            poster={video.thumbnail_key ? `${MEDIA}/videos/${video.id}/thumbnail` : undefined}
           />
         ) : video.thumbnail_key ? (
           <img
@@ -751,7 +759,7 @@ const VideoCard = ({ video, navigate, priority = false }) => {
             fetchPriority={priority ? 'high' : 'auto'}
             width={400}
             height={225}
-            src={`${API}/videos/${video.id}/thumbnail`}
+            src={`${MEDIA}/videos/${video.id}/thumbnail`}
             alt={video.title}
           />
         ) : (
@@ -1406,7 +1414,7 @@ const AdminPanel = ({ onClose }) => {
                 <div key={video.id} className="video-card admin-card" style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 12 }}>
                   <div className="video-thumb-admin" style={{ width: '100%', height: 112, background: '#1f2937', borderRadius: 8, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     {video.thumbnail_key ? (
-                      <img loading="lazy" src={`${API}/videos/${video.id}/thumbnail`} alt={video.title} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                      <img loading="lazy" src={`${MEDIA}/videos/${video.id}/thumbnail`} alt={video.title} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                     ) : (
                       <span style={{ color: '#9ca3af', fontSize: 12 }}>No thumbnail</span>
                     )}
