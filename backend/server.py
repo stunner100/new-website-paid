@@ -129,6 +129,27 @@ def verify_token(token: str):
     except jwt.InvalidTokenError:
         return None
 
+def _normalize_whitespace(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+def normalize_category(category: str) -> str:
+    # Trim, collapse whitespace, and Title-Case for display consistency
+    c = _normalize_whitespace(category)
+    return c.title() if c else c
+
+def normalize_tag(tag: str) -> str:
+    # Trim/collapse whitespace and lowercase for consistent matching
+    return _normalize_whitespace(tag).lower()
+
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     payload = verify_token(token)
@@ -293,8 +314,10 @@ async def upload_video(
         content = await file.read()
         await buffer.write(content)
     
-    # Parse tags
-    tags_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    # Normalize category and tags
+    category = normalize_category(category)
+    tags_list_raw = [t for t in (tags.split(",") if isinstance(tags, str) else [])]
+    tags_list = dedupe_preserve_order([normalize_tag(tag) for tag in tags_list_raw if _normalize_whitespace(tag)])
     
     # Create video record
     video = Video(
@@ -335,7 +358,9 @@ async def get_videos(
         query["status"] = status
 
     if category:
-        query["category"] = category
+        # Case-insensitive exact match for category to handle mixed-case values
+        cat = _normalize_whitespace(category)
+        query["category"] = {"$regex": f"^{re.escape(cat)}$", "$options": "i"}
 
     videos = await db.videos.find(query).sort("created_at", -1).to_list(100)
     return [Video(**video) for video in videos]
@@ -489,32 +514,51 @@ async def reject_video(video_id: str, admin_user: User = Depends(get_admin_user)
 
 @api_router.get("/categories")
 async def get_categories():
-    categories = await db.videos.distinct("category")
-    return {"categories": categories}
+    cats = await db.videos.distinct("category")
+    # Normalize, dedupe, and sort for stable UI
+    norm = [normalize_category(c) for c in cats if isinstance(c, str) and _normalize_whitespace(c)]
+    uniq = dedupe_preserve_order([c for c in norm if c])
+    uniq_sorted = sorted(uniq, key=lambda s: s.lower())
+    return {"categories": uniq_sorted}
 
 @api_router.post("/search")
-async def search_videos(search_data: VideoSearch, current_user: User = Depends(get_current_user)):
+async def search_videos(search_data: VideoSearch, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional)):
     query = {}
-    
-    # Regular users can only see approved videos
-    if not current_user.is_admin:
+
+    # Determine admin from optional credentials
+    is_admin = False
+    if credentials and credentials.scheme.lower() == "bearer":
+        payload = verify_token(credentials.credentials)
+        if payload:
+            user = await db.users.find_one({"id": payload["sub"]})
+            if user:
+                is_admin = bool(user.get("is_admin"))
+
+    # Regular/anonymous users can only see approved videos
+    if not is_admin:
         query["status"] = "approved"
     elif search_data.status:
         query["status"] = search_data.status
-    
+
     if search_data.category:
-        query["category"] = search_data.category
-    
+        cat = _normalize_whitespace(search_data.category)
+        query["category"] = {"$regex": f"^{re.escape(cat)}$", "$options": "i"}
+
     if search_data.tags:
-        query["tags"] = {"$in": search_data.tags}
-    
+        # Case-insensitive match for any provided tag
+        tag_regexes = [{"$regex": f"^{re.escape(normalize_tag(t))}$", "$options": "i"} for t in search_data.tags if t]
+        if tag_regexes:
+            query["tags"] = {"$in": tag_regexes}
+
     if search_data.query:
-        query["$or"] = [
-            {"title": {"$regex": search_data.query, "$options": "i"}},
-            {"description": {"$regex": search_data.query, "$options": "i"}},
-            {"tags": {"$regex": search_data.query, "$options": "i"}}
-        ]
-    
+        q = _normalize_whitespace(search_data.query)
+        if q:
+            query["$or"] = [
+                {"title": {"$regex": q, "$options": "i"}},
+                {"description": {"$regex": q, "$options": "i"}},
+                {"tags": {"$regex": q, "$options": "i"}},
+            ]
+
     videos = await db.videos.find(query).sort("created_at", -1).to_list(100)
     return [Video(**video) for video in videos]
 
