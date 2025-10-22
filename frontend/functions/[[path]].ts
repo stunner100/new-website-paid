@@ -136,6 +136,20 @@ function jsonCached(c: any, status: number, body: any, seconds: number, extra: R
   })
 }
 
+// Normalization helpers for categories/tags to avoid duplicates and ensure consistent filtering
+const normalizeWs = (s: string) => (s || '').replace(/\s+/g, ' ').trim()
+const normalizeCategory = (s: string) => {
+  const t = normalizeWs(s)
+  return t.replace(/\b(\p{L})(\p{L}*)/gu, (_: string, a: string, b: string) => a.toUpperCase() + b.toLowerCase())
+}
+const normalizeTag = (s: string) => normalizeWs(s).toLowerCase()
+const dedupePreserve = (arr: string[]) => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const v of arr) { if (!seen.has(v)) { seen.add(v); out.push(v) } }
+  return out
+}
+
 // Admin: list users
 app.get('/api/admin/users', async (c) => {
   await ensureSchema(c)
@@ -530,8 +544,11 @@ app.post('/api/videos/upload', async (c) => {
     const file = form.get('file') as File | null
     const title = String(form.get('title') || '')
     const description = String(form.get('description') || '')
-    const category = String(form.get('category') || '')
+    let category = String(form.get('category') || '')
     const tagsStr = String(form.get('tags') || '')
+    // Normalize category/tags
+    category = normalizeCategory(category)
+    const tagList = dedupePreserve(tagsStr.split(',').map((t) => normalizeTag(t)).filter(Boolean))
     if (!file || !title || !description || !category) return json(c, 400, { detail: 'Missing fields' })
 
     const safeName = sanitizeFilename(file.name || 'upload.mp4')
@@ -539,11 +556,7 @@ app.post('/api/videos/upload', async (c) => {
     // Put into R2
     await c.env.VIDEOS.put(storageKey, file.stream(), { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
 
-    const tags = tagsStr
-      .split(',')
-      .map((t) => t.trim())
-      .filter(Boolean)
-    const tagsArray = `{${tags.map((t) => '"' + t.replace(/"/g, '\\"') + '"').join(',')}}`
+    const tagsArray = `{${tagList.map((t) => '"' + t.replace(/"/g, '\\"') + '"').join(',')}}`
 
     const db = sql(c)
     const rows = await db`insert into videos (title, description, category, tags, status, uploader_id, storage_key)
@@ -562,16 +575,14 @@ app.post('/api/videos', async (c) => {
     await ensureSchema(c)
     const { userId } = await requireAdmin(c)
     const body = await c.req.json().catch(() => ({}))
-    const { title, description, category, tags = [], storageKey, thumbnailKey } = body
+    let { title, description, category, tags = [], storageKey, thumbnailKey } = body
     if (!title || !description || !category || !storageKey) return json(c, 400, { detail: 'Missing fields' })
 
-    const tagsArray = Array.isArray(tags)
-      ? `{${tags.map((t: string) => '"' + String(t).replace(/"/g, '\\"') + '"').join(',')}}`
-      : `{${String(tags)
-          .split(',')
-          .map((t: string) => '"' + t.trim().replace(/"/g, '\\"') + '"')
-          .filter(Boolean)
-          .join(',')}}`
+    // Normalize category/tags
+    category = normalizeCategory(String(category))
+    const tagsArr: string[] = Array.isArray(tags) ? (tags as string[]) : String(tags).split(',')
+    const normTags = dedupePreserve(tagsArr.map((t) => normalizeTag(String(t))).filter(Boolean))
+    const tagsArray = `{${normTags.map((t: string) => '"' + String(t).replace(/"/g, '\\"') + '"').join(',')}}`
 
     const db = sql(c)
     const rows = await db(
@@ -610,7 +621,7 @@ app.get('/api/videos', async (c) => {
   } else if (status && status !== 'all') {
     whereParts.push(`status=$${idx++}`); params.push(status)
   }
-  if (category) { whereParts.push(`category=$${idx++}`); params.push(category) }
+  if (category) { whereParts.push(`category ILIKE $${idx++}`); params.push(category) }
   const where = whereParts.length ? `where ${whereParts.join(' and ')}` : ''
 
   // total count
@@ -734,7 +745,7 @@ app.put('/api/videos/:id', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const title = body.title != null ? String(body.title) : undefined
   const description = body.description != null ? String(body.description) : undefined
-  const category = body.category != null ? String(body.category) : undefined
+  let category = body.category != null ? String(body.category) : undefined
   const tags = body.tags
   if (title !== undefined && !title.trim()) return json(c, 400, { detail: 'Title cannot be empty' })
   if (description !== undefined && !description.trim()) return json(c, 400, { detail: 'Description cannot be empty' })
@@ -743,15 +754,12 @@ app.put('/api/videos/:id', async (c) => {
   let idx = 1
   if (title !== undefined) { sets.push(`title=$${idx++}`); params.push(title) }
   if (description !== undefined) { sets.push(`description=$${idx++}`); params.push(description) }
-  if (category !== undefined) { sets.push(`category=$${idx++}`); params.push(category) }
+  if (category !== undefined) { category = normalizeCategory(category); sets.push(`category=$${idx++}`); params.push(category) }
   if (tags !== undefined) {
-    if (Array.isArray(tags)) {
-      const tagsArray = `{${tags.map((t: string) => '"' + String(t).replace(/"/g, '\\"') + '"').join(',')}}`
-      sets.push(`tags=$${idx++}::text[]`); params.push(tagsArray)
-    } else {
-      const tagsArray = `{${String(tags).split(',').map((t: string) => '"' + t.trim().replace(/"/g, '\\"') + '"').filter(Boolean).join(',')}}`
-      sets.push(`tags=$${idx++}::text[]`); params.push(tagsArray)
-    }
+    const tagsArr: string[] = Array.isArray(tags) ? (tags as string[]) : String(tags).split(',')
+    const normTags = dedupePreserve(tagsArr.map((t) => normalizeTag(String(t))).filter(Boolean))
+    const tagsArray = `{${normTags.map((t: string) => '"' + String(t).replace(/"/g, '\\"') + '"').join(',')}}`
+    sets.push(`tags=$${idx++}::text[]`); params.push(tagsArray)
   }
   if (!sets.length) return json(c, 400, { detail: 'No changes provided' })
   sets.push(`updated_at=now()`)
@@ -855,8 +863,10 @@ app.get('/api/categories', async (c) => {
   await ensureSchema(c)
   const db = sql(c)
   const rows = await db`select distinct category from videos where status='approved' order by category asc`
-  const categories = (rows as any).map((r: any) => r.category)
-  return jsonCached(c, 200, { categories }, 300)
+  const raw = (rows as any).map((r: any) => String(r.category || ''))
+  const norm = dedupePreserve(raw.map((s) => normalizeCategory(s)).filter(Boolean))
+  norm.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'accent' }))
+  return jsonCached(c, 200, { categories: norm }, 300)
 })
 
 // Search
@@ -875,8 +885,8 @@ app.post('/api/search', async (c) => {
   const whereParts: string[] = ["status='approved'"]
   const params: any[] = []
   let idx = 1
-  if (query) { whereParts.push(`(title ilike $${idx} or description ilike $${idx})`); params.push(like) }
-  if (category) { whereParts.push(`category=$${idx++}`); params.push(category) }
+  if (query) { whereParts.push(`(title ilike $${idx} or description ilike $${idx} or exists (select 1 from unnest(tags) t where t ilike $${idx}))`); params.push(like) }
+  if (category) { whereParts.push(`category ILIKE $${idx++}`); params.push(category) }
   const where = `where ${whereParts.join(' and ')}`
   const totalRows = await db(`select count(*) as c from videos ${where}`, params)
   const total = Number((totalRows as any)[0]?.c || 0)
